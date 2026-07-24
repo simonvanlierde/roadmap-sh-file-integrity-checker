@@ -1,0 +1,13 @@
+[package]
+name = "integrity-check"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# NOTE: the "asm" feature is what buys the hardware SHA-2 path; the pure-Rust
+# default backend is ~5x slower here. Drop it when moving to sha2 0.11 backends.
+hmac = "0.12"
+sha2 = { version = "0.10", features = ["asm"] }
+
+[profile.release]
+lto = true

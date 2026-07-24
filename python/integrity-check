@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+r"""File integrity checker. Store v2: "<sha256>\t<size>\t<mtime>\t<path>" per line."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+import stat
+import sys
+
+Entries = dict[str, tuple[str, int, int]]
+
+HEADER = "#integrity-check v2"
+SIG = "#hmac-sha256 "
+DB = os.path.abspath(os.environ.get("INTEGRITY_DB") or ".integrity.db")
+KEYFILE = os.environ.get("INTEGRITY_KEY")
+JOBS = os.cpu_count() or 4
+NARGS = 2  # <action> <target>
+
+
+def die(msg: str) -> None:
+    """Report an error on stderr and exit 2. Never returns."""
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def under(path: str, prefix: str) -> bool:
+    """Whether path is prefix itself or sits inside it. One definition for check and prune."""
+    return path == prefix or path.startswith(prefix + os.sep)
+
+
+def check_name(path: str) -> None:
+    """Reject names a line-based, tab-separated store cannot hold; matches bash/rust."""
+    if "\t" in path or "\n" in path:
+        die(f"unsupported filename (tab or newline): {path}")
+    if not path.isascii():  # ascii fast path; os.walk hands back surrogates for raw bytes
+        try:
+            path.encode("utf-8")
+        except UnicodeEncodeError:
+            die(f"non-UTF-8 filename unsupported: {path}")
+
+
+def unlink(path: str) -> None:
+    """Remove path if it is there."""
+    try:  # noqa: SIM105  # contextlib.suppress costs 3ms of startup for two cleanup paths
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def files(target: str) -> list[tuple[str, os.stat_result]]:
+    """List the regular files under target with their stat, or target itself if it is one."""
+    target = os.path.abspath(target)
+    if os.path.isdir(target):
+        out = []
+        for r, _, ns in os.walk(target, onerror=lambda e: die(f"{e.filename}: {e.strerror}")):
+            for n in ns:
+                p = os.path.join(r, n)
+                try:
+                    st = os.lstat(p)
+                except OSError as e:
+                    die(f"{p}: {e.strerror}")
+                if stat.S_ISREG(st.st_mode):  # skips symlinks, fifos, devices
+                    check_name(p)
+                    out.append((p, st))
+        return out
+    try:
+        st = os.stat(target)
+    except OSError as e:
+        die(f"{target}: {e.strerror}")
+    if not stat.S_ISREG(st.st_mode):
+        die(f"not a regular file: {target}")
+    check_name(target)
+    return [(target, st)]
+
+
+def sha256(path: str) -> str:
+    """Return the hex SHA-256 of a file, read in 1 MB chunks."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError as e:
+        die(f"{path}: {e.strerror}")
+    return h.hexdigest()
+
+
+def scan(target: str, baseline: Entries | None = None) -> Entries:
+    """{path: (hash, size, mtime)}. With a baseline, reuse its hash when size+mtime match."""
+    meta = {p: (st.st_size, int(st.st_mtime)) for p, st in files(target) if p != DB}
+    todo = [p for p in meta if baseline is None or baseline.get(p, ("",))[1:] != meta[p]]
+    # hashlib releases the GIL per chunk; below ~16 MB the handoff costs more than it saves
+    if len(todo) > 1 and sum(meta[p][0] for p in todo) > (16 << 20):
+        # ThreadPoolExecutor pulls in logging, ~12ms; keep it off the small-file path
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        with ThreadPoolExecutor(max_workers=JOBS) as pool:
+            fresh = dict(zip(todo, pool.map(sha256, todo)))
+    else:
+        fresh = {p: sha256(p) for p in todo}
+    return {p: (fresh.get(p) or baseline[p][0], *meta[p]) for p in meta}
+
+
+def read_key(*, create: bool = False) -> bytes | None:
+    """Return the signing key, generating it at 0600 when create is set."""
+    if not KEYFILE:
+        return None
+    try:
+        if not os.path.exists(KEYFILE):
+            if not create:
+                die(f"key file not found: {KEYFILE}")
+            fd = os.open(KEYFILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(os.urandom(32))
+            print(f"Generated signing key {KEYFILE}. Keep it off the monitored host.")
+        with open(KEYFILE, "rb") as f:
+            return f.read()
+    except OSError as e:
+        die(f"{KEYFILE}: {e.strerror}")
+        return None  # unreachable: die() exits
+
+
+def mac(key: bytes, body: bytes) -> str:
+    """Return the hex HMAC-SHA256 of a store body, which is raw bytes as stored on disk."""
+    return hmac.new(key, body, hashlib.sha256).hexdigest()
+
+
+def verified(raw: bytes, lines: list[str]) -> list[str]:
+    """Check the trailing signature line against the key and return the lines without it."""
+    sig = lines[-1][len(SIG) :] if lines and lines[-1].startswith(SIG) else None
+    if sig is not None:
+        lines = lines[:-1]
+    key = read_key()
+    if sig and not key:
+        die("store is signed but INTEGRITY_KEY is not set")
+    if key and not sig:
+        die("INTEGRITY_KEY is set but the store is unsigned; re-run init")
+    if key:
+        # The signature covers the raw bytes of every line but its own; rejoining decoded
+        # lines would rewrite \r\n as \n and accept a line-ending change.
+        end = raw[:-1] if raw.endswith(b"\n") else raw
+        if not hmac.compare_digest(sig, mac(key, raw[: end.rfind(b"\n") + 1])):
+            die("store signature mismatch: the baseline itself was tampered with")
+    return lines
+
+
+def load() -> Entries | None:
+    """Read the store, or return None when it does not exist yet."""
+    if not os.path.exists(DB):
+        return None
+    try:
+        with open(DB, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        die(f"{DB}: {e.strerror}")
+    try:  # rust cannot represent a non-UTF-8 store at all, so all three refuse one
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        die(f"store is not valid UTF-8: {DB}")
+    # Split on "\n" alone: str.splitlines() also breaks on \v, \f, \x1c-\x1e, \x85 and
+    # U+2028/U+2029, which are legal in filenames.
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # trailing newline, not an empty final entry
+    if "\r" in text:  # one trailing \r per line, as rust's str::lines and bash's awk do
+        lines = [x.removesuffix("\r") for x in lines]
+    if not lines or lines[0] != HEADER:
+        die(f'unsupported store: expected "{HEADER}" header')
+
+    entries = {}
+    for line in verified(raw, lines):
+        if line and not line.startswith("#"):
+            try:
+                digest, size, mtime, path = line.split("\t", 3)
+                entries[path] = (digest, int(size), int(mtime))
+            except ValueError:
+                die(f"malformed store line: {line}")
+    return entries
+
+
+def save(entries: Entries) -> int:
+    """Write the store atomically, signed when a key is configured, and return the entry count."""
+    body = HEADER + "\n" + "".join(f"{e[0]}\t{e[1]}\t{e[2]}\t{p}\n" for p, e in sorted(entries.items()))
+    key = read_key(create=True)
+    tmp = f"{DB}.{os.getpid()}.tmp"
+    unlink(tmp)  # stale leftover from a crashed run; O_EXCL still rules below
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write(body)
+            if key:
+                # sign the bytes that land on disk
+                f.write(SIG + mac(key, body.encode("utf-8", "surrogateescape")) + "\n")
+        os.replace(tmp, DB)
+    except OSError as e:
+        unlink(tmp)
+        die(f"{DB}: {e.strerror}")
+    return len(entries)
+
+
+def cmd_store(action: str, target: str) -> int:
+    """Run init or update: re-baseline target, leaving the rest of the store alone."""
+    entries = load() or {}
+    fresh = scan(target)
+    prefix = os.path.abspath(target)
+    # drop vanished entries under the target (else Missing forever); keep the rest
+    entries = {p: e for p, e in entries.items() if p in fresh or not under(p, prefix)}
+    entries.update(fresh)
+    n = save(entries)
+    msg = "Hashes stored successfully." if action == "init" else "Hash updated successfully."
+    print(f"{msg} ({n} tracked, {DB})")
+    return 0
+
+
+def cmd_check(target: str, *, fast: bool) -> int:
+    """Compare target against the baseline; return 1 when anything differs."""
+    baseline = load()
+    if baseline is None:
+        die(f"no baseline at {DB}, run 'init' first")
+    prefix = os.path.abspath(target)
+    current = scan(target, baseline if fast else None)
+    stored = {p: e for p, e in baseline.items() if under(p, prefix)}
+
+    lines, bad = [], 0
+    for path, entry in current.items():
+        if path not in stored:
+            lines.append(f"{path}: Untracked")
+            bad += 1
+        elif stored[path][0] == entry[0]:
+            lines.append(f"{path}: Unmodified")
+        else:
+            lines.append(f"{path}: Modified (hash mismatch)")
+            bad += 1
+    for path in stored.keys() - current.keys():
+        lines.append(f"{path}: Missing (file deleted)")
+        bad += 1
+    if lines:
+        print("\n".join(sorted(lines)))
+    return 1 if bad else 0
+
+
+def main(argv: list[str]) -> int:
+    """Parse the command line and dispatch; return the process exit code."""
+    args = argv[1:]
+    fast = args[1:2] == ["--fast"]
+    if fast:
+        del args[1]
+    if len(args) != NARGS or args[0] not in ("init", "check", "update") or (fast and args[0] != "check"):
+        print(
+            "usage: integrity-check {init|update} <file|dir>\n       integrity-check check [--fast] <file|dir>",
+            file=sys.stderr,
+        )
+        return 2
+    action, target = args
+    if not os.path.exists(target):
+        die(f"no such file or directory: {target}")
+    return cmd_check(target, fast=fast) if action == "check" else cmd_store(action, target)
+
+
+if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")
+    sys.exit(main(sys.argv))

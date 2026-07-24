@@ -1,0 +1,312 @@
+#!/usr/bin/env bash
+# File integrity checker. Store v2: "<sha256>\t<size>\t<mtime>\t<path>" per line.
+set -euo pipefail
+
+DB=${INTEGRITY_DB:-$PWD/.integrity.db}
+KEYFILE=${INTEGRITY_KEY:-}
+JOBS=${JOBS:-} # resolved in scan(), only once something is actually hashed
+HEADER='#integrity-check v2'
+SIGTAG='#hmac-sha256 '
+FAST=
+
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA=(sha256sum)
+else
+  SHA=(shasum -a 256)
+fi
+ICONV=$(command -v iconv >/dev/null 2>&1 && echo 1 || true)
+# NOTE: stat prints raw tv_sec, python/rust truncate toward zero; differs only for
+# pre-1970 fractional mtimes.
+if stat -f '%z' . >/dev/null 2>&1; then
+  STAT=(stat -L -f '%z %m %N') # BSD
+else
+  STAT=(stat -L -c '%s %Y %n') # GNU
+fi
+
+die() {
+  echo "error: $1" >&2
+  exit 2
+}
+
+# Fixed scratch names are safe: $WORK is a 0700 mkdtemp and each function runs at most once.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/integrity.XXXXXX")
+TMPDB=
+trap 'rm -rf "$WORK"; [ -z "$TMPDB" ] || rm -f "$TMPDB"' EXIT
+sha_stdin() { "${SHA[@]}" | cut -d' ' -f1; }
+
+# Lexical normalization only, symlinks left alone; matches python/rust.
+abspath() {
+  local p=$1 c out=''
+  case $p in
+  /*) ;;
+  *) p=${PWD%/}/$p ;;
+  esac
+  while [ -n "$p" ]; do
+    c=${p%%/*}
+    p=${p#"$c"}
+    p=${p#/}
+    case $c in
+    '' | .) ;;
+    ..) out=${out%/*} ;;
+    *) out=$out/$c ;;
+    esac
+  done
+  printf '%s\n' "${out:-/}"
+}
+
+DB=$(abspath "$DB")
+
+# Rust keys the store by UTF-8 strings, so all three refuse non-UTF-8 names. Without
+# iconv the check is skipped, with a one-time warning.
+utf8_ok() { # <file or ->
+  if [ -z "$ICONV" ]; then
+    [ -n "$UTF8_UNCHECKED" ] || {
+      echo "warning: iconv not found, skipping UTF-8 validation" >&2
+      UTF8_UNCHECKED=1
+    }
+    return 0
+  fi
+  iconv -f UTF-8 -t UTF-8 <"${1/#-//dev/stdin}" >/dev/null 2>&1
+}
+
+list() { # NUL-delimited, so a filename containing a newline stays one record
+  local root db=$DB
+  root=$(abspath "$1")
+  # -path matches with fnmatch: escape the metacharacters or a store named "log[1].db"
+  # would never match itself and end up tracked.
+  db=${db//\\/\\\\}
+  db=${db//\*/\\*}
+  db=${db//\?/\\?}
+  db=${db//\[/\\[}
+  if [ -d "$root" ]; then
+    find -H "$root" -type f ! -path "$db" -print0 # never track the store itself
+  else
+    printf '%s\0' "$root"
+  fi
+}
+
+# Reject names the line-based, tab-separated store cannot hold; matches python/rust.
+check_names() { # <nul-delimited path list>
+  local p
+  # Fast path: no tab, newline, or high byte means plain ASCII, which is valid UTF-8.
+  # The per-path loops below only run once that trips.
+  # shellcheck disable=SC2094  # both sides read $1; nothing in this pipeline writes it
+  if LC_ALL=C tr -d '\t\n\200-\377' <"$1" | cmp -s - "$1"; then return 0; fi
+  while IFS= read -r -d '' p; do
+    case $p in
+    *[$'\t\n']*) die "unsupported filename (tab or newline): $p" ;;
+    esac
+  done <"$1"
+  # High bytes left: check the list in one go, walk it only to name the offender.
+  utf8_ok "$1" && return 0
+  while IFS= read -r -d '' p; do
+    printf '%s' "$p" | utf8_ok - || die "non-UTF-8 filename unsupported: $p"
+  done <"$1"
+}
+
+check_target() { # reject early: dying inside scan's pipeline adds a second error line
+  [ -e "$1" ] || die "no such file or directory: $1"
+  # absolute path, to match python and rust
+  [ -d "$1" ] || [ -f "$1" ] || die "not a regular file: $(abspath "$1")"
+}
+
+# --- HMAC-SHA256 (RFC 2104) via builtins + the sha256 binary; keeps the key out
+# of argv where `ps` could read it. ---------------------------------------------
+unhex() { printf '%b' "$(printf '%s' "$1" | sed 's/../\\x&/g')"; } # hex string -> raw bytes
+
+# Call before any $(hmac_file ...): a die inside a substitution only kills the subshell.
+need_key() {
+  [ -f "$KEYFILE" ] || die "key file not found: $KEYFILE"
+  [ -r "$KEYFILE" ] || die "cannot read key file: $KEYFILE"
+}
+
+key_hex() { # hex of the key file; call need_key first
+  od -An -v -tx1 <"$KEYFILE" | tr -d ' \n'
+}
+
+hmac_file() { # <file> -> hex digest
+  local k i b ipad='' opad='' inner
+  k=$(key_hex)
+  [ ${#k} -gt 128 ] && k=$(unhex "$k" | sha_stdin)
+  while [ ${#k} -lt 128 ]; do k+="00"; done
+  for ((i = 0; i < 128; i += 2)); do
+    b=$((16#${k:i:2}))
+    printf -v ipad '%s\\x%02x' "$ipad" "$((b ^ 0x36))"
+    printf -v opad '%s\\x%02x' "$opad" "$((b ^ 0x5c))"
+  done
+  inner=$({
+    printf '%b' "$ipad"
+    cat "$1"
+  } | sha_stdin)
+  {
+    printf '%b' "$opad"
+    unhex "$inner"
+  } | sha_stdin
+}
+
+# --- store ---------------------------------------------------------------------
+db_entries() { # <dest>: verified entry lines of the store, signature and comments stripped
+  local sig nonce ents=$1
+  [ -r "$DB" ] || die "cannot read store: $DB"
+  utf8_ok "$DB" || die "store is not valid UTF-8: $DB"
+  : >"$ents" # awk only creates it once there is an entry to emit
+  # One pass: check the header, split off the trailing signature, validate the entries.
+  # \r is stripped for comparisons and emitted entries; the signature covers raw bytes.
+  sig=$(awk -v hdr="$HEADER" -v sigtag="$SIGTAG" -v ents="$ents" '
+		function bail(msg) { print "error: " msg > "/dev/stderr"; bad = 1; exit 2 }
+		function emit(line,   f) { # by-value param: the caller keeps its \r
+			sub(/\r$/, "", line)
+			if (line == "" || line ~ /^#/) return
+			if (split(line, f, "\t") != 4) bail("malformed store line: " line)
+			print line > ents
+		}
+		NR == 1 { h = $0; sub(/\r$/, "", h); if (h != hdr) bail("unsupported store: expected \"" hdr "\" header") }
+		NR > 1 { emit(prev) }
+		{ prev = $0 }
+		END {
+			if (bad) exit 2
+			if (NR == 0) bail("unsupported store: expected \"" hdr "\" header")
+			last = prev; sub(/\r$/, "", last)
+			if (index(last, sigtag) == 1) print substr(last, length(sigtag) + 1)
+			else emit(prev)
+		}
+	' "$DB") || exit 2
+  if [ -n "$sig" ] && [ -z "$KEYFILE" ]; then die "store is signed but INTEGRITY_KEY is not set"; fi
+  if [ -n "$KEYFILE" ] && [ -z "$sig" ]; then die "INTEGRITY_KEY is set but the store is unsigned; re-run init"; fi
+  if [ -n "$KEYFILE" ]; then
+    need_key
+    sed '$d' "$DB" >"$WORK/body" # the signature covers every line but its own
+    # Constant-time comparison, bash-style: compare both digests hashed under a fresh
+    # random nonce, so a timing leak exposes nothing about the expected signature.
+    nonce=$(head -c 32 /dev/urandom | od -An -v -tx1 | tr -d ' \n')
+    [ "$(printf '%s%s' "$nonce" "$(hmac_file "$WORK/body")" | sha_stdin)" = \
+      "$(printf '%s%s' "$nonce" "$sig" | sha_stdin)" ] ||
+      die "store signature mismatch: the baseline itself was tampered with"
+  fi
+}
+
+write_db() { # stdin: entry lines
+  local body sig
+  [ ! -d "$DB" ] || die "store path is a directory: $DB"
+  body=$DB.$$.tmp # same temp name in all three ports
+  rm -f "$body"   # stale leftover from a crashed run; noclobber still rules below
+  TMPDB=$body
+  (umask 077 && set -C && {
+    echo "$HEADER"
+    # count entries as they stream past, for cmd_store
+    LC_ALL=C sort -t$'\t' -k4 | awk -v cnt="$WORK/n" '{ print; n++ } END { print n + 0 >cnt }'
+  } >"$body") || die "cannot write store next to $DB"
+  if [ -n "$KEYFILE" ]; then
+    if [ ! -f "$KEYFILE" ]; then
+      (umask 077 && set -C && head -c 32 /dev/urandom >"$KEYFILE")
+      echo "Generated signing key $KEYFILE. Keep it off the monitored host."
+    fi
+    need_key
+    sig=$(hmac_file "$body")
+    printf '%s%s\n' "$SIGTAG" "$sig" >>"$body"
+  fi
+  mv "$body" "$DB"
+  TMPDB=
+}
+
+# --- scanning ------------------------------------------------------------------
+# <target> [baseline-file] -> "hash\tsize\tmtime\tpath" lines. With a baseline, reuse its
+# hash when size+mtime match; the caller passes already-verified entries.
+scan() {
+  local meta=$WORK/meta reuse=$WORK/reuse tohash=$WORK/tohash hashed=$WORK/hashed paths=$WORK/paths
+  : >"$reuse" # only written when there is a baseline, always read back
+  list "$1" >"$paths"
+  check_names "$paths" # before stat, so a bad name is named rather than mangled
+  # -r: GNU xargs runs the command once on empty input, BSD does not. An empty tree
+  # would otherwise reach stat with no operands and abort the scan.
+  xargs -0 -r -n 200 "${STAT[@]}" <"$paths" |
+    awk '{ s = $1; m = $2; sub(/^[0-9-]+ [0-9-]+ /, ""); print s "\t" m "\t" $0 }' >"$meta" ||
+    die "scan failed under $1"
+
+  if [ -n "${2:-}" ]; then
+    awk -F'\t' -v reuse="$reuse" -v tohash="$tohash" -v dbf="$2" '
+			FILENAME == dbf { h[$4] = $1; sm[$4] = $2 "\t" $3; next }
+			($3 in h) && sm[$3] == $1 "\t" $2 { print h[$3] "\t" $0 >reuse; next }
+			{ print $3 >tohash }
+		' "$2" "$meta"
+  else
+    cut -f3 "$meta" >"$tohash"
+  fi
+
+  if [ -s "$tohash" ]; then
+    : "${JOBS:=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
+    tr '\n' '\0' <"$tohash" | xargs -0 -n 64 -P "$JOBS" "${SHA[@]}" |
+      awk '{ h = $1; sub(/^[0-9a-f]+ +/, ""); print h "\t" $0 }' >"$hashed" ||
+      die "hashing failed under $1"
+    awk -F'\t' -v metaf="$meta" '
+			FILENAME == metaf { m[$3] = $1 "\t" $2; next }
+			{ print $1 "\t" m[$2] "\t" $2 }' "$meta" "$hashed"
+  fi
+  cat "$reuse"
+}
+
+cmd_store() {
+  local action=$1 target=$2 prefix n new=$WORK/new old=$WORK/old
+  check_target "$target"
+  prefix=$(abspath "$target")
+  : >"$old" # stays empty when there is no store yet
+  # verify the existing store first: a tampered baseline must abort, not be overwritten
+  if [ -f "$DB" ]; then db_entries "$old"; fi
+  scan "$target" >"$new"
+  {
+    cat "$new"
+    # drop vanished entries under the target (else Missing forever); keep the rest
+    awk -F'\t' -v newf="$new" -v prefix="$prefix" '
+			FILENAME == newf { seen[$4]; next }
+			$4 in seen { next }
+			$4 == prefix || index($4, prefix "/") == 1 { next }
+			1' "$new" "$old"
+  } | write_db
+  n=$(<"$WORK/n") # written by write_db
+  case $action in
+  init) echo "Hashes stored successfully. ($n tracked, $DB)" ;;
+  update) echo "Hash updated successfully. ($n tracked, $DB)" ;;
+  esac
+}
+
+cmd_check() {
+  local target=$1 prefix cur=$WORK/cur dbf=$WORK/dbf
+  check_target "$target"
+  [ -f "$DB" ] || die "no baseline at $DB, run 'init' first"
+  prefix=$(abspath "$target")
+  db_entries "$dbf"
+  scan "$target" ${FAST:+"$dbf"} >"$cur"
+  awk -F'\t' -v prefix="$prefix" -v curfile="$cur" '
+		FILENAME == curfile { cur[$4] = $1; next }
+		$4 == prefix || index($4, prefix "/") == 1 { db[$4] = $1 }
+		END {
+			for (f in cur) {
+				if (!(f in db))           { print f ": Untracked";                bad++ }
+				else if (db[f] == cur[f])   print f ": Unmodified"
+				else                      { print f ": Modified (hash mismatch)"; bad++ }
+			}
+			for (f in db) if (!(f in cur)) { print f ": Missing (file deleted)";  bad++ }
+			exit bad > 0
+		}' "$cur" "$dbf" | LC_ALL=C sort
+}
+
+usage() {
+  echo "usage: integrity-check {init|update} <file|dir>" >&2
+  echo "       integrity-check check [--fast] <file|dir>" >&2
+  exit 2
+}
+
+action=${1:-}
+shift || usage
+if [ "${1:-}" = --fast ]; then
+  FAST=1
+  shift
+fi
+[ $# -eq 1 ] || usage
+[ -z "$FAST" ] || [ "$action" = check ] || usage
+
+case $action in
+init | update) cmd_store "$action" "$1" ;;
+check) cmd_check "$1" ;;
+*) usage ;;
+esac

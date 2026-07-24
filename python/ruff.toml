@@ -1,0 +1,16 @@
+# The CLI has no .py extension, so ruff needs to be told it is Python.
+extend-include = ["integrity-check"]
+line-length    = 120
+target-version = "py39" # the system python3 on macOS; the CLI must run there unmodified
+
+[lint]
+  select = ["ALL"]
+  ignore = [
+    "CPY001", # no copyright headers anywhere in this repo
+    "T201",   # print is this program's output
+    "PTH",    # os.path.abspath does not resolve symlinks and Path.resolve does; swapping
+              # them changes the recorded paths and breaks the byte-identical store the
+              # bash and rust ports must agree on. pathlib also costs ~7ms of startup.
+    "D203",   # incompatible with D211, which ruff prefers
+    "D213",   # ditto, against D212
+  ]

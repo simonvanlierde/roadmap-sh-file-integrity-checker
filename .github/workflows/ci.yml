@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    # ext4 accepts filenames APFS refuses outright, so Linux is the only place test.sh's
+    # non-UTF-8 name case actually runs; it skips itself elsewhere. macOS covers BSD
+    # stat/awk/sed, which differ from the GNU ones enough to have broken this before.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the rust implementation
+        run: cargo build --release --manifest-path rust/Cargo.toml
+
+      - name: Test all three
+        run: ./test.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # shellcheck and the cargo hooks are `language: system` in .pre-commit-config.yaml,
+      # so prek expects them on PATH; ruff and shfmt it fetches itself.
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - uses: j178/prek-action@v2
