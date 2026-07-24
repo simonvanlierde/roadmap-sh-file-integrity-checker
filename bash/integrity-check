@@ -14,7 +14,10 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   SHA=(shasum -a 256)
 fi
-ICONV=$(command -v iconv >/dev/null 2>&1 && echo 1 || true)
+ICONV=
+if command -v iconv >/dev/null 2>&1; then
+  ICONV=1
+fi
 # NOTE: stat prints raw tv_sec, python/rust truncate toward zero; differs only for
 # pre-1970 fractional mtimes.
 if stat -f '%z' . >/dev/null 2>&1; then
