@@ -11,14 +11,13 @@ repos:
     hooks:
       - id: shfmt
 
-  - repo: local
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
     hooks:
       - id: shellcheck
-        name: shellcheck
-        entry: shellcheck
-        language: system
-        types: [ shell ]
 
+  - repo: local
+    hooks:
       - id: clippy
         name: cargo clippy
         entry: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings

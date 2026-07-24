@@ -2,8 +2,9 @@ name: ci
 
 on:
   push:
-    branches: ["**"]
+    branches: [ "**" ]
   pull_request:
+
 
 jobs:
   test:
@@ -13,13 +14,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ ubuntu-latest, macos-latest ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-
+      # No toolchain action: the runners ship rustup, which installs the version
+      # rust-toolchain.toml pins on the first cargo call.
       - name: Build the rust implementation
         run: cargo build --release --manifest-path rust/Cargo.toml
 
@@ -30,13 +31,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      # shellcheck and the cargo hooks are `language: system` in .pre-commit-config.yaml,
-      # so prek expects them on PATH; ruff and shfmt it fetches itself.
-      - run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - uses: j178/prek-action@v2

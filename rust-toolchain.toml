@@ -1,0 +1,6 @@
+# At the repo root, not in rust/: rustup resolves this from the working directory, and
+# both CI and the prek hooks run cargo from here with --manifest-path rust/Cargo.toml.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
