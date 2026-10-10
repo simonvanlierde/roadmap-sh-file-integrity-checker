@@ -309,6 +309,22 @@ for impl in "${BUILT[@]}"; do
   assert "signature mismatch"
   unset INTEGRITY_KEY
 
+  # bash without iconv skips the UTF-8 check with a warning; under set -u it used to abort.
+  # iconv shares /usr/bin with the rest, so PATH gets a dir of links to everything else.
+  if [ "$impl" = bash/integrity-check ]; then
+    noiconv=$tmp/noiconv
+    mkdir "$noiconv"
+    for t in bash awk cat cmp cut find head mktemp mv nproc od perl rm sed sha256sum shasum \
+      sort stat sysctl tr xargs; do
+      if p=$(command -v "$t"); then ln -s "$p" "$noiconv/$t"; fi
+    done
+    export INTEGRITY_DB="$tmp/noiconv.db"
+    run 0 "$cli" init "$plain"
+    run 0 env PATH="$noiconv" "$cli" check "$plain"
+    assert "warning: iconv not found, skipping UTF-8 validation"
+    assert "p.log: Unmodified"
+  fi
+
   rm -rf "$tmp" "$tmp.ref" "$tmp.key" "$tmp.key2"
   echo "ok: $impl"
 done

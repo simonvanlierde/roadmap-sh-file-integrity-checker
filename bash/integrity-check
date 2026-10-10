@@ -15,6 +15,7 @@ else
   SHA=(shasum -a 256)
 fi
 ICONV=
+UTF8_UNCHECKED= # set once the missing-iconv warning has been printed
 if command -v iconv >/dev/null 2>&1; then
   ICONV=1
 fi
