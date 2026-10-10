@@ -336,6 +336,39 @@ for impl in "${BUILT[@]}"; do
   echo "ok: $impl"
 done
 
+# A file replaced between the walk and the hash: a save-by-rename is hashed, a symlink is
+# refused. The race cannot be timed, so this calls python's sha256() with the walk's old stat.
+tmp=$(mktemp -d "$TMPDIR/integrity.XXXXXX")
+impl=python/integrity-check
+python3 - "$PWD/$impl" "$tmp" <<'EOF' || fail "replaced-file handling"
+import hashlib, importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("ic", sys.argv[1])
+ic = importlib.util.module_from_spec(importlib.util.spec_from_loader("ic", loader))
+loader.exec_module(ic)
+p = os.path.join(sys.argv[2], "f")
+with open(p, "w") as f:
+    f.write("old")
+st = os.lstat(p)
+with open(p + ".new", "w") as f:
+    f.write("new")
+os.replace(p + ".new", p)
+assert ic.sha256(p, st) == hashlib.sha256(b"new").hexdigest(), "save-by-rename not hashed"
+# the target exists before p is removed, so it cannot reuse p's inode number
+st = os.lstat(p)
+with open(os.path.join(sys.argv[2], "t"), "w") as f:
+    f.write("t")
+os.remove(p)
+os.symlink("t", p)
+try:
+    ic.sha256(p, st)
+except SystemExit as e:
+    assert e.code == 2, e.code
+else:
+    raise AssertionError("symlink swap was hashed")
+EOF
+rm -rf "$tmp"
+echo "ok: python replaced-file handling"
+
 # All three must write the same store, signature included (line order may differ).
 if [ ${#BUILT[@]} -lt 2 ]; then
   echo "skip: cross-implementation comparison needs 2+ built implementations"

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::exit;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -104,8 +104,18 @@ fn collect(target: &Path) -> Vec<(PathBuf, fs::Metadata)> {
     out
 }
 
-fn sha256(path: &Path) -> String {
+/// `md` is the file's metadata from the walk.
+fn sha256(path: &Path, md: &fs::Metadata) -> String {
     let mut file = or_die(File::open(path), path);
+    // A save-by-rename swaps the inode after the walk, which is fine while the path
+    // still names the regular file we opened; anything else (a symlink) is refused.
+    let now = or_die(file.metadata(), path);
+    if (now.dev(), now.ino()) != (md.dev(), md.ino()) {
+        let cur = or_die(fs::symlink_metadata(path), path);
+        if !cur.file_type().is_file() || (cur.dev(), cur.ino()) != (now.dev(), now.ino()) {
+            die(&format!("{}: replaced during scan", path.display()));
+        }
+    }
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -120,7 +130,7 @@ fn sha256(path: &Path) -> String {
 
 /// Hash `paths` in parallel, in order. Workers pull indices off a shared cursor so one
 /// huge file among small ones cannot pin a whole chunk to a single thread.
-fn hash_many(paths: &[&Path]) -> Vec<String> {
+fn hash_many(paths: &[(&Path, &fs::Metadata)]) -> Vec<String> {
     let jobs = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .min(paths.len());
@@ -134,7 +144,7 @@ fn hash_many(paths: &[&Path]) -> Vec<String> {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         match paths.get(i) {
-                            Some(p) => done.push((i, sha256(p))),
+                            Some((p, md)) => done.push((i, sha256(p, md))),
                             None => return done,
                         }
                     }
@@ -153,7 +163,7 @@ fn hash_many(paths: &[&Path]) -> Vec<String> {
 /// Current state of `target`. With a baseline, reuse its hash when size+mtime match.
 fn scan<'a>(target: &Path, db: &Path, baseline: Option<&Store<'a>>) -> Store<'a> {
     let mut store = Store::new();
-    let mut todo = Vec::new(); // (name, size, mtime, path) for the files that need hashing
+    let mut todo = Vec::new(); // (name, mtime, path, metadata) for the files that need hashing
     for (path, md) in collect(target) {
         if path == db {
             continue;
@@ -172,12 +182,17 @@ fn scan<'a>(target: &Path, db: &Path, baseline: Option<&Store<'a>>) -> Store<'a>
                 // clone of a Cow::Borrowed is a pointer copy
                 store.insert(Cow::Owned(name), (old.0.clone(), md.len(), mtime));
             }
-            None => todo.push((name, md.len(), mtime, path)),
+            None => todo.push((name, mtime, path, md)),
         }
     }
-    let hashes = hash_many(&todo.iter().map(|t| t.3.as_path()).collect::<Vec<_>>());
-    for ((name, size, mtime, _), hash) in todo.into_iter().zip(hashes) {
-        store.insert(Cow::Owned(name), (Cow::Owned(hash), size, mtime));
+    let hashes = hash_many(
+        &todo
+            .iter()
+            .map(|t| (t.2.as_path(), &t.3))
+            .collect::<Vec<_>>(),
+    );
+    for ((name, mtime, _, md), hash) in todo.into_iter().zip(hashes) {
+        store.insert(Cow::Owned(name), (Cow::Owned(hash), md.len(), mtime));
     }
     store
 }

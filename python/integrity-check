@@ -75,11 +75,18 @@ def files(target: str) -> list[tuple[str, os.stat_result]]:
     return [(target, st)]
 
 
-def sha256(path: str) -> str:
-    """Return the hex SHA-256 of a file, read in 1 MB chunks."""
+def sha256(path: str, st: os.stat_result) -> str:
+    """Return the hex SHA-256 of a file, read in 1 MB chunks. st is its stat from the walk."""
     h = hashlib.sha256()
     try:
         with open(path, "rb") as f:
+            # A save-by-rename swaps the inode after the walk, which is fine while the path
+            # still names the regular file we opened; anything else (a symlink) is refused.
+            now = os.fstat(f.fileno())
+            if not os.path.samestat(now, st):
+                cur = os.lstat(path)
+                if not (stat.S_ISREG(cur.st_mode) and os.path.samestat(cur, now)):
+                    die(f"{path}: replaced during scan")
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk)
     except OSError as e:
@@ -89,7 +96,8 @@ def sha256(path: str) -> str:
 
 def scan(target: str, baseline: Entries | None = None) -> Entries:
     """{path: (hash, size, mtime)}. With a baseline, reuse its hash when size+mtime match."""
-    meta = {p: (st.st_size, int(st.st_mtime)) for p, st in files(target) if p != DB}
+    found = {p: st for p, st in files(target) if p != DB}
+    meta = {p: (st.st_size, int(st.st_mtime)) for p, st in found.items()}
     todo = [p for p in meta if baseline is None or baseline.get(p, ("",))[1:] != meta[p]]
     # hashlib releases the GIL per chunk; below ~16 MB the handoff costs more than it saves
     if len(todo) > 1 and sum(meta[p][0] for p in todo) > (16 << 20):
@@ -97,9 +105,9 @@ def scan(target: str, baseline: Entries | None = None) -> Entries:
         from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
 
         with ThreadPoolExecutor(max_workers=JOBS) as pool:
-            fresh = dict(zip(todo, pool.map(sha256, todo)))
+            fresh = dict(zip(todo, pool.map(sha256, todo, [found[p] for p in todo])))
     else:
-        fresh = {p: sha256(p) for p in todo}
+        fresh = {p: sha256(p, found[p]) for p in todo}
     return {p: (fresh.get(p) or baseline[p][0], *meta[p]) for p in meta}
 
 
