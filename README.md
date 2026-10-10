@@ -18,20 +18,20 @@ rust/target/release/integrity-check   # cargo build --release --manifest-path ru
 Identical for all three:
 
 ```console
-$ ./bash/integrity-check init /var/log
-Hashes stored successfully. (412 tracked, /Users/you/.integrity.db)
+$ ./bash/integrity-check init ~/notes
+Hashes stored successfully. (38 tracked, /Users/you/.integrity.db)
 
-$ ./python/integrity-check check /var/log/syslog
-/var/log/syslog: Modified (hash mismatch)
+$ ./python/integrity-check check ~/notes/todo.md
+/Users/you/notes/todo.md: Modified (hash mismatch)
 
-$ ./rust/target/release/integrity-check check /var/log
-/var/log/auth.log: Unmodified
-/var/log/new.log: Untracked
-/var/log/old.log: Missing (file deleted)
-/var/log/syslog: Modified (hash mismatch)
+$ ./rust/target/release/integrity-check check ~/notes
+/Users/you/notes/ideas.md: Unmodified
+/Users/you/notes/new.md: Untracked
+/Users/you/notes/old.md: Missing (file deleted)
+/Users/you/notes/todo.md: Modified (hash mismatch)
 
-$ ./bash/integrity-check update /var/log/syslog
-Hash updated successfully. (412 tracked, /Users/you/.integrity.db)
+$ ./bash/integrity-check update ~/notes/todo.md
+Hash updated successfully. (38 tracked, /Users/you/.integrity.db)
 ```
 
 | Command | Effect |
