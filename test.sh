@@ -307,6 +307,13 @@ for impl in "${BUILT[@]}"; do
   mv "$tmp.crlf" "$INTEGRITY_DB"
   run 2 "$cli" check "$plain"
   assert "signature mismatch"
+  # a non-ASCII signature is a mismatch too, not a crash (python's compare_digest on str)
+  rm -f "$INTEGRITY_DB"
+  run 0 "$cli" init "$plain"
+  sed '$s/^\(#hmac-sha256 \).*/\1héllo/' "$INTEGRITY_DB" >"$tmp.sig"
+  mv "$tmp.sig" "$INTEGRITY_DB"
+  run 2 "$cli" check "$plain"
+  assert "signature mismatch"
   unset INTEGRITY_KEY
 
   # bash without iconv skips the UTF-8 check with a warning; under set -u it used to abort.

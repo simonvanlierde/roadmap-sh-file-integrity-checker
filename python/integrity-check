@@ -141,7 +141,8 @@ def verified(raw: bytes, lines: list[str]) -> list[str]:
         # The signature covers the raw bytes of every line but its own; rejoining decoded
         # lines would rewrite \r\n as \n and accept a line-ending change.
         end = raw[:-1] if raw.endswith(b"\n") else raw
-        if not hmac.compare_digest(sig, mac(key, raw[: end.rfind(b"\n") + 1])):
+        # compare bytes: compare_digest raises TypeError on a non-ASCII str
+        if not hmac.compare_digest(sig.encode(), mac(key, raw[: end.rfind(b"\n") + 1]).encode()):
             die("store signature mismatch: the baseline itself was tampered with")
     return lines
 
