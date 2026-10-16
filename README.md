@@ -75,7 +75,8 @@ audit that matters.
 ## Tests and benchmarks
 
 `./test.sh` runs one scenario against each built binary and checks that all three write
-byte-identical stores, signature included. `./bench.sh` writes [BENCHMARKS.md](BENCHMARKS.md)
+byte-identical stores, signature included. `./difftest.sh` runs all three on 50 random trees
+and fails, naming the seed, on the first difference in exit code or output. `./bench.sh` writes [BENCHMARKS.md](BENCHMARKS.md)
 and needs [hyperfine](https://github.com/sharkdp/hyperfine).
 
 ## License

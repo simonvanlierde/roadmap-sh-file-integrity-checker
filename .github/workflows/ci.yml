@@ -32,6 +32,9 @@ jobs:
       - name: Test all three
         run: ./test.sh
 
+      - name: Differential test on random trees
+        run: ./difftest.sh
+
   lint:
     runs-on: ubuntu-latest
     steps:
