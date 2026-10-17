@@ -237,6 +237,9 @@ for impl in "${BUILT[@]}"; do
   run 2 env INTEGRITY_DB="$tmp/nokey.db" "$cli" init "$tmp/a.log"
   [ ! -e "$tmp/nokey.db" ] || fail "stored a baseline despite an unreadable key"
   chmod 600 "$INTEGRITY_KEY"
+  # a key that cannot be created is an environment error (2), not a discrepancy (1)
+  run 2 env INTEGRITY_KEY="$tmp/nodir/key" INTEGRITY_DB="$tmp/nokey.db" "$cli" init "$tmp/a.log"
+  [ ! -e "$tmp/nokey.db" ] || fail "stored a baseline without a key"
   # rewriting a stored hash by hand must be caught even though the file is untouched
   sed 's/^[0-9a-f]\{64\}/0000000000000000000000000000000000000000000000000000000000000000/' \
     "$INTEGRITY_DB" >"$INTEGRITY_DB.tmp" && mv "$INTEGRITY_DB.tmp" "$INTEGRITY_DB"
@@ -330,9 +333,39 @@ for impl in "${BUILT[@]}"; do
     run 0 env PATH="$noiconv" "$cli" check "$plain"
     assert "warning: iconv not found, skipping UTF-8 validation"
     assert "p.log: Unmodified"
+
+    # The entries must come from the same bytes the signature is checked on. A shim awk
+    # puts the genuine store back after the first awk read, which stands in for an
+    # attacker who renames a forged store in for one read only. Reading the store twice
+    # would accept the forged entries (exit 1, Untracked); one read sees the forgery.
+    swap=$tmp/shim-swap
+    mkdir "$swap"
+    export INTEGRITY_DB="$tmp/swap.db" INTEGRITY_KEY="$tmp.key3"
+    run 0 "$cli" init "$plain"
+    cp "$INTEGRITY_DB" "$tmp/genuine.db"
+    grep -vF "$plain/p.log" "$tmp/genuine.db" >"$INTEGRITY_DB" # entry gone, signature kept
+    cat >"$swap/awk" <<EOF
+#!/bin/sh
+"$(command -v awk)" "\$@"
+rc=\$?
+[ -e "$tmp/swapped" ] || { : >"$tmp/swapped"; cp "$tmp/genuine.db" "$INTEGRITY_DB"; }
+exit \$rc
+EOF
+    chmod +x "$swap/awk"
+    run 2 env PATH="$swap:$PATH" "$cli" check "$plain"
+    assert "signature mismatch"
+    unset INTEGRITY_KEY
+
+    # a failed rename of the temp store is an environment error (2) and leaves no temp file
+    nomv=$tmp/shim-mv
+    mkdir "$nomv"
+    printf '#!/bin/sh\nexit 1\n' >"$nomv/mv"
+    chmod +x "$nomv/mv"
+    run 2 env PATH="$nomv:$PATH" INTEGRITY_DB="$tmp/mv.db" "$cli" init "$plain"
+    [ -z "$(find "$tmp" -maxdepth 1 -name 'mv.db*')" ] || fail "failed rename left a store or temp file"
   fi
 
-  rm -rf "$tmp" "$tmp.ref" "$tmp.key" "$tmp.key2"
+  rm -rf "$tmp" "$tmp.ref" "$tmp.key" "$tmp.key2" "$tmp.key3"
   echo "ok: $impl"
 done
 
