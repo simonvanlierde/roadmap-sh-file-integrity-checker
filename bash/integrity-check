@@ -34,8 +34,7 @@ die() {
 
 # Fixed scratch names are safe: $WORK is a 0700 mkdtemp and each function runs at most once.
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/integrity.XXXXXX")
-TMPDB=
-trap 'rm -rf "$WORK"; [ -z "$TMPDB" ] || rm -f "$TMPDB"' EXIT
+trap 'rm -rf "$WORK"' EXIT
 sha_stdin() { "${SHA[@]}" | cut -d' ' -f1; }
 
 # Lexical normalization only, symlinks left alone; matches python/rust.
@@ -194,7 +193,8 @@ write_db() { # stdin: entry lines
   [ ! -d "$DB" ] || die "store path is a directory: $DB"
   body=$DB.$$.tmp # same temp name in all three ports
   rm -f "$body"   # stale leftover from a crashed run; noclobber still rules below
-  TMPDB=$body
+  # write_db runs in a pipeline subshell, which does not run the main EXIT trap
+  trap 'rm -f "$body"' EXIT
   (umask 077 && set -C && {
     echo "$HEADER"
     # count entries as they stream past, for cmd_store
@@ -202,15 +202,15 @@ write_db() { # stdin: entry lines
   } >"$body") || die "cannot write store next to $DB"
   if [ -n "$KEYFILE" ]; then
     if [ ! -f "$KEYFILE" ]; then
-      (umask 077 && set -C && head -c 32 /dev/urandom >"$KEYFILE")
+      (umask 077 && set -C && head -c 32 /dev/urandom >"$KEYFILE") ||
+        die "cannot create key file: $KEYFILE"
       echo "Generated signing key $KEYFILE. Keep it off the monitored host."
     fi
     need_key
     sig=$(hmac_file "$body")
     printf '%s%s\n' "$SIGTAG" "$sig" >>"$body"
   fi
-  mv "$body" "$DB"
-  TMPDB=
+  mv "$body" "$DB" || die "cannot replace store: $DB"
 }
 
 # --- scanning ------------------------------------------------------------------

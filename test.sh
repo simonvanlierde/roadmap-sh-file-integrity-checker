@@ -237,6 +237,9 @@ for impl in "${BUILT[@]}"; do
   run 2 env INTEGRITY_DB="$tmp/nokey.db" "$cli" init "$tmp/a.log"
   [ ! -e "$tmp/nokey.db" ] || fail "stored a baseline despite an unreadable key"
   chmod 600 "$INTEGRITY_KEY"
+  # a key that cannot be created is an environment error (2), not a discrepancy (1)
+  run 2 env INTEGRITY_KEY="$tmp/nodir/key" INTEGRITY_DB="$tmp/nokey.db" "$cli" init "$tmp/a.log"
+  [ ! -e "$tmp/nokey.db" ] || fail "stored a baseline without a key"
   # rewriting a stored hash by hand must be caught even though the file is untouched
   sed 's/^[0-9a-f]\{64\}/0000000000000000000000000000000000000000000000000000000000000000/' \
     "$INTEGRITY_DB" >"$INTEGRITY_DB.tmp" && mv "$INTEGRITY_DB.tmp" "$INTEGRITY_DB"
@@ -330,6 +333,15 @@ for impl in "${BUILT[@]}"; do
     run 0 env PATH="$noiconv" "$cli" check "$plain"
     assert "warning: iconv not found, skipping UTF-8 validation"
     assert "p.log: Unmodified"
+
+
+    # a failed rename of the temp store is an environment error (2) and leaves no temp file
+    nomv=$tmp/shim-mv
+    mkdir "$nomv"
+    printf '#!/bin/sh\nexit 1\n' >"$nomv/mv"
+    chmod +x "$nomv/mv"
+    run 2 env PATH="$nomv:$PATH" INTEGRITY_DB="$tmp/mv.db" "$cli" init "$plain"
+    [ -z "$(find "$tmp" -maxdepth 1 -name 'mv.db*')" ] || fail "failed rename left a store or temp file"
   fi
 
   rm -rf "$tmp" "$tmp.ref" "$tmp.key" "$tmp.key2"
