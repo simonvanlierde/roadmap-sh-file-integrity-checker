@@ -6,6 +6,9 @@ on:
   pull_request:
 
 
+permissions:
+  contents: read
+
 jobs:
   test:
     # ext4 accepts filenames APFS refuses outright, so Linux is the only place test.sh's
@@ -17,7 +20,9 @@ jobs:
         os: [ ubuntu-latest, macos-latest ]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       # No toolchain action: the runners ship rustup, which installs the version
       # rust-toolchain.toml pins on the first cargo call.
@@ -30,6 +35,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: j178/prek-action@v2
+      - uses: j178/prek-action@5337cb91e0fa35a7ff31b9ca345126d8bbbcdf16 # v2
