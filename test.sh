@@ -334,6 +334,27 @@ for impl in "${BUILT[@]}"; do
     assert "warning: iconv not found, skipping UTF-8 validation"
     assert "p.log: Unmodified"
 
+    # The entries must come from the same bytes the signature is checked on. A shim awk
+    # puts the genuine store back after the first awk read, which stands in for an
+    # attacker who renames a forged store in for one read only. Reading the store twice
+    # would accept the forged entries (exit 1, Untracked); one read sees the forgery.
+    swap=$tmp/shim-swap
+    mkdir "$swap"
+    export INTEGRITY_DB="$tmp/swap.db" INTEGRITY_KEY="$tmp.key3"
+    run 0 "$cli" init "$plain"
+    cp "$INTEGRITY_DB" "$tmp/genuine.db"
+    grep -vF "$plain/p.log" "$tmp/genuine.db" >"$INTEGRITY_DB" # entry gone, signature kept
+    cat >"$swap/awk" <<EOF
+#!/bin/sh
+"$(command -v awk)" "\$@"
+rc=\$?
+[ -e "$tmp/swapped" ] || { : >"$tmp/swapped"; cp "$tmp/genuine.db" "$INTEGRITY_DB"; }
+exit \$rc
+EOF
+    chmod +x "$swap/awk"
+    run 2 env PATH="$swap:$PATH" "$cli" check "$plain"
+    assert "signature mismatch"
+    unset INTEGRITY_KEY
 
     # a failed rename of the temp store is an environment error (2) and leaves no temp file
     nomv=$tmp/shim-mv
@@ -344,7 +365,7 @@ for impl in "${BUILT[@]}"; do
     [ -z "$(find "$tmp" -maxdepth 1 -name 'mv.db*')" ] || fail "failed rename left a store or temp file"
   fi
 
-  rm -rf "$tmp" "$tmp.ref" "$tmp.key" "$tmp.key2"
+  rm -rf "$tmp" "$tmp.ref" "$tmp.key" "$tmp.key2" "$tmp.key3"
   echo "ok: $impl"
 done
 
