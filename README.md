@@ -65,6 +65,8 @@ Signing only helps if the key sits somewhere the attacker can't reach: another h
 root-owned path, removable media. Keep it outside the monitored tree too, or it shows up as
 `Untracked` on every check.
 
+[docs/threat-model.md](docs/threat-model.md) lists what signing and the other defences stop, and what they don't.
+
 ## The `--fast` path
 
 `check --fast` re-hashes only the files whose size or mtime changed since the baseline. That
