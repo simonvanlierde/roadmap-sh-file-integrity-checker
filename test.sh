@@ -310,6 +310,21 @@ for impl in "${BUILT[@]}"; do
     assert "malformed store line"
   done
 
+  # size fits a u64 and mtime an i64, as in rust; bash and python used to take any length
+  for sm in '18446744073709551616	1' '99999999999999999999	1' '1	9223372036854775808' \
+    '1	-9223372036854775809' '0018446744073709551616	1'; do
+    printf '#integrity-check v2\n%064d\t%s\t%s\n' 0 "$sm" "$plain/p.log" >"$INTEGRITY_DB"
+    run 2 "$cli" check "$plain"
+    assert "malformed store line"
+  done
+  # the bounds themselves still parse, leading zeros too: the entry is only stale
+  for sm in '18446744073709551615	1' '1	9223372036854775807' '1	-9223372036854775808' \
+    '0018446744073709551615	-0009223372036854775808'; do
+    printf '#integrity-check v2\n%064d\t%s\t%s\n' 0 "$sm" "$plain/p.log" >"$INTEGRITY_DB"
+    run 1 "$cli" check "$plain"
+    assert "p.log: Modified"
+  done
+
   # A valid store whose byte 1023 starts a 3-byte character: macOS iconv, reading 1024
   # bytes at a time, refused such a store (bash exit 2, no output).
   rm -f "$INTEGRITY_DB"
