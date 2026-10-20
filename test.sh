@@ -3,7 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-IMPLS=(bash/integrity-check python/integrity-check rust/target/release/integrity-check)
+# INTEGRITY_IMPLS replaces the list, for example with the binary `cargo test` just built.
+read -r -a IMPLS <<<"${INTEGRITY_IMPLS:-bash/integrity-check python/integrity-check rust/target/release/integrity-check}"
+path_of() { case $1 in /*) printf '%s\n' "$1" ;; *) printf '%s\n' "$PWD/$1" ;; esac }
 
 # macOS sets TMPDIR with a trailing slash; collapse it like the implementations do, or
 # the literal path comparisons below compare two spellings.
@@ -59,7 +61,7 @@ for impl in "${BUILT[@]}"; do
   tmp=$(mktemp -d "$TMPDIR/integrity.XXXXXX")
   export INTEGRITY_DB="$tmp/.integrity.db"
   unset INTEGRITY_KEY
-  cli=$PWD/$impl
+  cli=$(path_of "$impl")
   printf 'one\n' >"$tmp/a.log"
   printf 'two\n' >"$tmp/b.log"
   mkdir "$tmp/sub" && printf 'three\n' >"$tmp/sub/c.log"
@@ -527,7 +529,7 @@ else
   (umask 077 && head -c 32 /dev/urandom >"$tmp.key") # a hand-made key must be private too
   export INTEGRITY_KEY="$tmp.key"
   for impl in "${BUILT[@]}"; do
-    INTEGRITY_DB="$tmp.db.${impl//\//_}" "$PWD/$impl" init "$tmp" >/dev/null
+    INTEGRITY_DB="$tmp.db.${impl//\//_}" "$(path_of "$impl")" init "$tmp" >/dev/null
     cmp -s <(sort "$tmp.db.${BUILT[0]//\//_}") <(sort "$tmp.db.${impl//\//_}") ||
       fail "implementations disagree on the store (hash, metadata or signature)"
   done
