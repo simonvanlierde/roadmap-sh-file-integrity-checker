@@ -250,7 +250,7 @@ fn read_key(create: bool) -> Option<Vec<u8>> {
         ));
     }
     // SAFETY: geteuid takes no arguments and cannot fail.
-    if md.uid() != unsafe { libc::geteuid() } && md.uid() != 0 {
+    if ![unsafe { libc::geteuid() }, 0].contains(&md.uid()) {
         die(&format!(
             "key file belongs to another user: {}",
             path.display()
@@ -536,6 +536,25 @@ mod tests {
     use std::fs;
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    /// An editor's save-by-rename gives the path a new inode after the scan; that file is
+    /// hashed, not refused.
+    #[test]
+    fn save_by_rename_is_hashed() {
+        let dir = std::env::temp_dir().join(format!("ic-rename-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("f");
+        fs::write(&p, "old").unwrap();
+        let md = fs::symlink_metadata(&p).unwrap();
+        fs::write(dir.join("f.new"), "new").unwrap();
+        fs::rename(dir.join("f.new"), &p).unwrap();
+        let hash = sha256(&p, &md);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            hash,
+            "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437"
+        );
+    }
 
     /// A FIFO swapped in after the scan must be refused at once, not waited on. sha256 exits
     /// the process, so the case runs in a child copy of this test binary.

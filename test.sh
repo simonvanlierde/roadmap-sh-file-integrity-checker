@@ -3,7 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-IMPLS=(bash/integrity-check python/integrity-check rust/target/release/integrity-check)
+# INTEGRITY_IMPLS replaces the list, for example with the binary `cargo test` just built.
+read -r -a IMPLS <<<"${INTEGRITY_IMPLS:-bash/integrity-check python/integrity-check rust/target/release/integrity-check}"
+path_of() { case $1 in /*) printf '%s\n' "$1" ;; *) printf '%s\n' "$PWD/$1" ;; esac }
 
 # macOS sets TMPDIR with a trailing slash; collapse it like the implementations do, or
 # the literal path comparisons below compare two spellings.
@@ -59,7 +61,7 @@ for impl in "${BUILT[@]}"; do
   tmp=$(mktemp -d "$TMPDIR/integrity.XXXXXX")
   export INTEGRITY_DB="$tmp/.integrity.db"
   unset INTEGRITY_KEY
-  cli=$PWD/$impl
+  cli=$(path_of "$impl")
   printf 'one\n' >"$tmp/a.log"
   printf 'two\n' >"$tmp/b.log"
   mkdir "$tmp/sub" && printf 'three\n' >"$tmp/sub/c.log"
@@ -111,6 +113,8 @@ for impl in "${BUILT[@]}"; do
   run 1 "$cli" check --fast "$tmp"
   assert "a.log: Modified (hash mismatch)"
   run 2 "$cli" init --fast "$tmp"
+  assert "usage"
+  run 2 "$cli" bogus "$tmp"
   assert "usage"
 
   # init/update on a missing target is an error
@@ -216,6 +220,8 @@ for impl in "${BUILT[@]}"; do
   # pre-1970 mtimes round-trip (skip if touch cannot set one)
   if touch -t 196901010000 "$tmp/old.log" 2>/dev/null; then
     run 0 "$cli" update "$tmp"
+    awk -F'\t' -v p="$tmp/old.log" '$4 == p && $3 < 0 { ok = 1 } END { exit !ok }' "$INTEGRITY_DB" ||
+      fail "pre-1970 mtime is not stored as a negative number"
     run 0 "$cli" check "$tmp"
     assert "old.log: Unmodified"
     rm "$tmp/old.log"
@@ -285,6 +291,13 @@ for impl in "${BUILT[@]}"; do
   assert "not the latest one recorded"
   run 2 "$cli" update "$tmp/r.log"
   assert "not the latest one recorded"
+  # a record that can't be read is an error, not a missing record (root ignores the mode)
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$INTEGRITY_KEY.last"
+    run 2 "$cli" check "$tmp/r.log"
+    assert "cannot read"
+    chmod 600 "$INTEGRITY_KEY.last"
+  fi
   # one key signs several stores without either looking rolled back
   run 0 env INTEGRITY_DB="$tmp/roll2.db" "$cli" init "$tmp/a.log"
   run 0 env INTEGRITY_DB="$tmp/roll3.db" "$cli" init "$tmp/a.log"
@@ -358,6 +371,14 @@ for impl in "${BUILT[@]}"; do
   printf '#integrity-check v2\n%064d\t1\t1\t/tmp/bad\xffname.log\n' 0 >"$INTEGRITY_DB"
   run 2 "$cli" check "$plain"
   assert "store is not valid UTF-8"
+  # an unreadable store is reported as one, not as bad UTF-8 (root ignores the mode)
+  if [ "$(id -u)" != 0 ]; then
+    printf '#integrity-check v2\n' >"$INTEGRITY_DB"
+    chmod 000 "$INTEGRITY_DB"
+    run 2 "$cli" check "$plain"
+    refute "UTF-8"
+    chmod 600 "$INTEGRITY_DB"
+  fi
 
   # size and mtime are plain ASCII digits (mtime may be negative); python's int() and
   # rust's parse() alone accept some of these
@@ -404,6 +425,16 @@ for impl in "${BUILT[@]}"; do
   rm -f "$INTEGRITY_DB"
   run 0 "$cli" init "$plain"
   sed '$s/^\(#hmac-sha256 \).*/\1héllo/' "$INTEGRITY_DB" >"$tmp.sig"
+  mv "$tmp.sig" "$INTEGRITY_DB"
+  run 2 "$cli" check "$plain"
+  assert "signature mismatch"
+  # two changed bytes whose differences cancel out under XOR still mismatch
+  rm -f "$INTEGRITY_DB"
+  run 0 "$cli" init "$plain"
+  sig=$(tail -1 "$INTEGRITY_DB")
+  sig=${sig#'#hmac-sha256 '}
+  sed '$d' "$INTEGRITY_DB" >"$tmp.sig"
+  printf '#hmac-sha256 %s%s\n' "$(printf '%s' "${sig:0:2}" | tr '0123456789abcdef' '1032547698`cbedg')" "${sig:2}" >>"$tmp.sig"
   mv "$tmp.sig" "$INTEGRITY_DB"
   run 2 "$cli" check "$plain"
   assert "signature mismatch"
@@ -527,7 +558,7 @@ else
   (umask 077 && head -c 32 /dev/urandom >"$tmp.key") # a hand-made key must be private too
   export INTEGRITY_KEY="$tmp.key"
   for impl in "${BUILT[@]}"; do
-    INTEGRITY_DB="$tmp.db.${impl//\//_}" "$PWD/$impl" init "$tmp" >/dev/null
+    INTEGRITY_DB="$tmp.db.${impl//\//_}" "$(path_of "$impl")" init "$tmp" >/dev/null
     cmp -s <(sort "$tmp.db.${BUILT[0]//\//_}") <(sort "$tmp.db.${impl//\//_}") ||
       fail "implementations disagree on the store (hash, metadata or signature)"
   done
