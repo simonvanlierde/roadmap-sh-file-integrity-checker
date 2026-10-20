@@ -31,7 +31,7 @@ def die(msg: str) -> NoReturn:
 
 def under(path: str, prefix: str) -> bool:
     """Whether path is prefix itself or sits inside it. One definition for check and prune."""
-    return path == prefix or path.startswith(prefix + os.sep)
+    return path == prefix or path.startswith(prefix.rstrip(os.sep) + os.sep)  # "/" holds everything
 
 
 def check_name(path: str) -> None:
@@ -129,9 +129,12 @@ def read_key(*, create: bool = False) -> bytes | None:
                 f.write(os.urandom(32))
             print(f"Generated signing key {KEYFILE}. Keep it off the monitored host.")
         with open(KEYFILE, "rb") as f:
-            return f.read()
+            key = f.read()
     except OSError as e:
         die(f"{KEYFILE}: {e.strerror}")
+    if not key:
+        die(f"key file is empty: {KEYFILE}")
+    return key
 
 
 def mac(key: bytes, body: bytes) -> str:

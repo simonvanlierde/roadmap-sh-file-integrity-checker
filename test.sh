@@ -237,6 +237,12 @@ for impl in "${BUILT[@]}"; do
   run 2 env INTEGRITY_KEY="$tmp/gone" "$cli" check "$tmp"
   assert "key file not found"
   refute "tampered" # a key problem must not be reported as a tampered baseline
+  # an empty key signs nothing: refuse it rather than sign with it or drop the signature
+  : >"$tmp.empty"
+  run 2 env INTEGRITY_KEY="$tmp.empty" INTEGRITY_DB="$tmp/ek.db" "$cli" init "$tmp/a.log"
+  assert "key file is empty"
+  [ ! -e "$tmp/ek.db" ] || fail "stored a baseline with an empty key"
+  rm "$tmp.empty"
   run 2 env -u INTEGRITY_KEY "$cli" check "$tmp"
   assert "store is signed"
   # an unreadable key must abort, not sign a fresh store with nothing
@@ -297,6 +303,11 @@ for impl in "${BUILT[@]}"; do
   INTEGRITY_DB="$glob/log[1].db" "$cli" init "$glob" >/dev/null
   INTEGRITY_DB="$glob/log[1].db" "$cli" init "$glob" >/dev/null
   [ "$(grep -cv '^#' "$glob/log[1].db")" = 1 ] || fail "store tracked itself: $(cat "$glob/log[1].db")"
+  # nor when the store is the target itself
+  INTEGRITY_DB="$glob/log[1].db" "$cli" init "$glob/log[1].db" >/dev/null
+  [ "$(grep -cv '^#' "$glob/log[1].db")" = 1 ] || fail "store tracked itself: $(cat "$glob/log[1].db")"
+  # JOBS in the environment is someone else's setting
+  run 0 env JOBS=auto INTEGRITY_DB="$glob/log[1].db" "$cli" init "$glob"
 
   # the store-level cases below need a plain filename: against $vt they would exit 2
   # for the 0x0B reason and test nothing
@@ -435,6 +446,7 @@ with open(p + ".new", "w") as f:
     f.write("new")
 os.replace(p + ".new", p)
 assert ic.sha256(p, st) == hashlib.sha256(b"new").hexdigest(), "save-by-rename not hashed"
+assert ic.under("/etc/hosts", "/") and ic.under("/a/b", "/a/") and not ic.under("/ab", "/a"), "under"
 # the target exists before p is removed, so it cannot reuse p's inode number
 st = os.lstat(p)
 with open(os.path.join(sys.argv[2], "t"), "w") as f:

@@ -29,6 +29,9 @@ jobs:
       - name: Build the rust implementation
         run: cargo build --release --manifest-path rust/Cargo.toml
 
+      - name: Rust unit tests
+        run: cargo test --release --manifest-path rust/Cargo.toml
+
       - name: Test all three
         run: ./test.sh
 

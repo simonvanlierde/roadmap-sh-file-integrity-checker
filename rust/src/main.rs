@@ -32,7 +32,8 @@ fn or_die<T, E: std::fmt::Display>(r: Result<T, E>, p: &Path) -> T {
 
 /// Whether `p` is `prefix` itself or sits inside it. One definition for check and prune.
 fn under(p: &str, prefix: &str) -> bool {
-    p == prefix || (p.starts_with(prefix) && p.as_bytes().get(prefix.len()) == Some(&b'/'))
+    let base = prefix.trim_end_matches('/'); // "/" holds everything
+    p == prefix || (p.starts_with(base) && p.as_bytes().get(base.len()) == Some(&b'/'))
 }
 
 /// The store key for a path: UTF-8, or it is not representable in the store.
@@ -205,26 +206,30 @@ fn read_key(create: bool) -> Option<Vec<u8>> {
             die(&format!("key file not found: {}", path.display()));
         }
         let mut key = [0u8; 32];
-        File::open("/dev/urandom")
-            .unwrap()
-            .read_exact(&mut key)
-            .unwrap();
+        let urandom = Path::new("/dev/urandom");
+        or_die(
+            File::open(urandom).and_then(|mut f| f.read_exact(&mut key)),
+            urandom,
+        );
         or_die(
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .open(&path),
+                .open(&path)
+                .and_then(|mut f| f.write_all(&key)),
             &path,
-        )
-        .write_all(&key)
-        .unwrap();
+        );
         println!(
             "Generated signing key {}. Keep it off the monitored host.",
             path.display()
         );
     }
-    Some(or_die(fs::read(&path), &path))
+    let key = or_die(fs::read(&path), &path);
+    if key.is_empty() {
+        die(&format!("key file is empty: {}", path.display()));
+    }
+    Some(key)
 }
 
 /// Hex HMAC-SHA256 of a store body.
@@ -426,4 +431,16 @@ fn main() {
         "check" => cmd_check(&target, &db, fast),
         action => cmd_store(action, &target, &db),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::under;
+
+    #[test]
+    fn under_matches_whole_components() {
+        assert!(under("/etc/hosts", "/"));
+        assert!(under("/a/b", "/a") && under("/a", "/a"));
+        assert!(!under("/ab", "/a"));
+    }
 }

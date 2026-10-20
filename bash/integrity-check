@@ -4,7 +4,6 @@ set -euo pipefail
 
 DB=${INTEGRITY_DB:-$PWD/.integrity.db}
 KEYFILE=${INTEGRITY_KEY:-}
-JOBS=${JOBS:-} # resolved in scan(), only once something is actually hashed
 HEADER='#integrity-check v2'
 SIGTAG='#hmac-sha256 '
 FAST=
@@ -88,7 +87,7 @@ list() { # NUL-delimited, so a filename containing a newline stays one record
   db=${db//\[/\\[}
   if [ -d "$root" ]; then
     find -H "$root" -type f ! -path "$db" -print0 # never track the store itself
-  else
+  elif [ "$root" != "$DB" ]; then
     printf '%s\0' "$root"
   fi
 }
@@ -126,6 +125,7 @@ unhex() { printf '%b' "$(printf '%s' "$1" | sed 's/../\\x&/g')"; } # hex string 
 need_key() {
   [ -f "$KEYFILE" ] || die "key file not found: $KEYFILE"
   [ -r "$KEYFILE" ] || die "cannot read key file: $KEYFILE"
+  [ -s "$KEYFILE" ] || die "key file is empty: $KEYFILE"
 }
 
 key_hex() { # hex of the key file; call need_key first
@@ -235,7 +235,7 @@ write_db() { # stdin: entry lines
 # <target> [baseline-file] -> "hash\tsize\tmtime\tpath" lines. With a baseline, reuse its
 # hash when size+mtime match; the caller passes already-verified entries.
 scan() {
-  local meta=$WORK/meta reuse=$WORK/reuse tohash=$WORK/tohash hashed=$WORK/hashed paths=$WORK/paths
+  local meta=$WORK/meta reuse=$WORK/reuse tohash=$WORK/tohash hashed=$WORK/hashed paths=$WORK/paths jobs
   : >"$reuse" # only written when there is a baseline, always read back
   list "$1" >"$paths"
   check_names "$paths" # before stat, so a bad name is named rather than mangled
@@ -261,8 +261,8 @@ scan() {
   fi
 
   if [ -s "$tohash" ]; then
-    : "${JOBS:=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
-    tr '\n' '\0' <"$tohash" | xargs -0 -n 64 -P "$JOBS" "${SHA[@]}" |
+    jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+    tr '\n' '\0' <"$tohash" | xargs -0 -n 64 -P "$jobs" "${SHA[@]}" |
       awk '{ h = $1; sub(/^[0-9a-f]+ +/, ""); print h "\t" $0 }' >"$hashed" ||
       die "hashing failed under $1"
     awk -F'\t' -v metaf="$meta" '
@@ -283,10 +283,10 @@ cmd_store() {
   {
     cat "$new"
     # drop vanished entries under the target (else Missing forever); keep the rest
-    awk -F'\t' -v newf="$new" -v prefix="$prefix" '
+    awk -F'\t' -v newf="$new" -v prefix="$prefix" -v pre="${prefix%/}/" '
 			FILENAME == newf { seen[$4]; next }
 			$4 in seen { next }
-			$4 == prefix || index($4, prefix "/") == 1 { next }
+			$4 == prefix || index($4, pre) == 1 { next }
 			1' "$new" "$old"
   } | write_db
   n=$(<"$WORK/n") # written by write_db
@@ -303,9 +303,9 @@ cmd_check() {
   prefix=$(abspath "$target")
   db_entries "$dbf"
   scan "$target" ${FAST:+"$dbf"} >"$cur"
-  awk -F'\t' -v prefix="$prefix" -v curfile="$cur" '
+  awk -F'\t' -v prefix="$prefix" -v pre="${prefix%/}/" -v curfile="$cur" '
 		FILENAME == curfile { cur[$4] = $1; next }
-		$4 == prefix || index($4, prefix "/") == 1 { db[$4] = $1 }
+		$4 == prefix || index($4, pre) == 1 { db[$4] = $1 }
 		END {
 			for (f in cur) {
 				if (!(f in db))           { print f ": Untracked";                bad++ }
