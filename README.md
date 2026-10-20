@@ -51,7 +51,7 @@ Location: `$INTEGRITY_DB`, default `./.integrity.db`. One line per file, sorted 
 
 Each write is atomic, with mode 0600. The store cannot hold a filename that contains a tab, a
 newline or invalid UTF-8, so all three versions refuse such a name before they hash anything.
-bash needs `iconv` for that check.
+bash needs `perl` for that check.
 
 ## Signing the store
 
