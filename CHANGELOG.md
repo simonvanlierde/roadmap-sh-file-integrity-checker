@@ -12,6 +12,8 @@ All notable changes to this project are documented here. The format follows
   `$INTEGRITY_KEY.last`, and every read refuses a store whose signature isn't the latest
   one recorded. Before, an older signed store put back together with an older file passed
   as `Unmodified`.
+- Prebuilt Rust binaries for Linux (x86_64, arm64) and macOS (arm64) on each release.
+- A README example that runs the checker from cron and mails only on a change or a failure.
 
 ## [0.1.0] - 2026-10-21
 
