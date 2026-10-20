@@ -14,10 +14,10 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   SHA=(shasum -a 256)
 fi
-ICONV=
-UTF8_UNCHECKED= # set once the missing-iconv warning has been printed
-if command -v iconv >/dev/null 2>&1; then
-  ICONV=1
+PERL=
+UTF8_UNCHECKED= # set once the missing-perl warning has been printed
+if command -v perl >/dev/null 2>&1; then
+  PERL=1
 fi
 # NOTE: stat prints raw tv_sec, python/rust truncate toward zero; differs only for
 # pre-1970 fractional mtimes.
@@ -60,16 +60,21 @@ abspath() {
 DB=$(abspath "$DB")
 
 # Rust keys the store by UTF-8 strings, so all three refuse non-UTF-8 names. Without
-# iconv the check is skipped, with a one-time warning.
+# perl the check is skipped, with a one-time warning.
+# Not iconv: macOS iconv reads 1024 bytes at a time and refuses valid input when a
+# character starts on the last byte of one read. perl checks line by line. utf8::decode
+# alone lets surrogates (ED A0-BF) and code points above U+10FFFF (F4 90+, F5-FF) through,
+# which python and rust refuse; the tr count keeps that regex off most lines.
 utf8_ok() { # <file or ->
-  if [ -z "$ICONV" ]; then
+  if [ -z "$PERL" ]; then
     [ -n "$UTF8_UNCHECKED" ] || {
-      echo "warning: iconv not found, skipping UTF-8 validation" >&2
+      echo "warning: perl not found, skipping UTF-8 validation" >&2
       UTF8_UNCHECKED=1
     }
     return 0
   fi
-  iconv -f UTF-8 -t UTF-8 <"${1/#-//dev/stdin}" >/dev/null 2>&1
+  perl -ne 'tr/\xED\xF4-\xFF// && /\xED[\xA0-\xBF]|\xF4[\x90-\xBF]|[\xF5-\xFF]/ ||
+    !utf8::decode($_) and exit 1' <"${1/#-//dev/stdin}" >/dev/null 2>&1
 }
 
 list() { # NUL-delimited, so a filename containing a newline stays one record

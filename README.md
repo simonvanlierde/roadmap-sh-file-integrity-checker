@@ -53,7 +53,7 @@ Size and mtime are plain ASCII digits, and mtime may start with `-`; any other l
 malformed. A `#hmac-sha256` line with nothing after it is no signature, so that store counts
 as unsigned. Each write is atomic, with mode 0600. The store cannot hold a filename that contains a tab, a
 newline or invalid UTF-8, so all three versions refuse such a name before they hash anything.
-bash needs `iconv` for that check.
+bash needs `perl` for that check.
 
 ## Signing the store
 

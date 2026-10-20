@@ -310,6 +310,16 @@ for impl in "${BUILT[@]}"; do
     assert "malformed store line"
   done
 
+  # A valid store whose byte 1023 starts a 3-byte character: macOS iconv, reading 1024
+  # bytes at a time, refused such a store (bash exit 2, no output).
+  rm -f "$INTEGRITY_DB"
+  run 0 "$cli" init "$plain"
+  pad=$((1023 - $(wc -c <"$INTEGRITY_DB") - 70)) # 70: hash, tab, 0, tab, 0, tab, slash
+  printf '%064d\t0\t0\t/%s日.log\n' 0 "$(printf "%${pad}s" '' | tr ' ' x)" >>"$INTEGRITY_DB"
+  [ "$(od -An -tx1 -j1023 -N1 "$INTEGRITY_DB" | tr -d ' ')" = e6 ] || fail "store layout off"
+  run 0 "$cli" check "$plain"
+  assert "p.log: Unmodified"
+
   # the signature covers the store's raw bytes: rewriting line endings under it must fail
   rm -f "$INTEGRITY_DB"
   export INTEGRITY_KEY="$tmp.key2"
@@ -336,19 +346,19 @@ for impl in "${BUILT[@]}"; do
   run 2 env INTEGRITY_KEY="$tmp.key2" "$cli" check "$plain"
   assert "store is unsigned"
 
-  # bash without iconv skips the UTF-8 check with a warning; under set -u it used to abort.
-  # iconv shares /usr/bin with the rest, so PATH gets a dir of links to everything else.
+  # bash without perl skips the UTF-8 check with a warning; under set -u it used to abort.
+  # perl shares /usr/bin with the rest, so PATH gets a dir of links to everything else.
   if [ "$impl" = bash/integrity-check ]; then
-    noiconv=$tmp/noiconv
-    mkdir "$noiconv"
-    for t in bash awk cat cmp cut find head mktemp mv nproc od perl rm sed sha256sum shasum \
+    noperl=$tmp/noperl
+    mkdir "$noperl"
+    for t in bash awk cat cmp cut find head mktemp mv nproc od rm sed sha256sum shasum \
       sort stat sysctl tr xargs; do
-      if p=$(command -v "$t"); then ln -s "$p" "$noiconv/$t"; fi
+      if p=$(command -v "$t"); then ln -s "$p" "$noperl/$t"; fi
     done
-    export INTEGRITY_DB="$tmp/noiconv.db"
+    export INTEGRITY_DB="$tmp/noperl.db"
     run 0 "$cli" init "$plain"
-    run 0 env PATH="$noiconv" "$cli" check "$plain"
-    assert "warning: iconv not found, skipping UTF-8 validation"
+    run 0 env PATH="$noperl" "$cli" check "$plain"
+    assert "warning: perl not found, skipping UTF-8 validation"
     assert "p.log: Unmodified"
 
     # The entries must come from the same bytes the signature is checked on. A shim awk
