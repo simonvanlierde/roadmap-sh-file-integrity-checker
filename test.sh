@@ -269,6 +269,36 @@ for impl in "${BUILT[@]}"; do
   assert "signature mismatch"
   run 2 "$cli" init "$tmp"
   assert "signature mismatch"
+
+  # An older signed store put back together with an older file is refused: each signed
+  # write records the store's signature next to the key, and each read checks it.
+  export INTEGRITY_KEY="$tmp.rkey" INTEGRITY_DB="$tmp/roll.db"
+  printf 'v1\n' >"$tmp/r.log"
+  run 0 "$cli" init "$tmp/r.log"
+  cp "$INTEGRITY_DB" "$tmp/roll.old"
+  cp -p "$tmp/r.log" "$tmp/r.old"
+  printf 'v2\n' >"$tmp/r.log"
+  run 0 "$cli" update "$tmp/r.log"
+  cp "$tmp/roll.old" "$INTEGRITY_DB"
+  cp -p "$tmp/r.old" "$tmp/r.log"
+  run 2 "$cli" check "$tmp/r.log"
+  assert "not the latest one recorded"
+  run 2 "$cli" update "$tmp/r.log"
+  assert "not the latest one recorded"
+  # one key signs several stores without either looking rolled back
+  run 0 env INTEGRITY_DB="$tmp/roll2.db" "$cli" init "$tmp/a.log"
+  run 0 env INTEGRITY_DB="$tmp/roll3.db" "$cli" init "$tmp/a.log"
+  run 0 env INTEGRITY_DB="$tmp/roll2.db" "$cli" check "$tmp/a.log"
+  # a record that cannot be written is a warning, not a failure (root ignores the mode)
+  if [ "$(id -u)" != 0 ]; then
+    mkdir "$tmp/ro"
+    (umask 077 && head -c 32 /dev/urandom >"$tmp/ro/key")
+    chmod 500 "$tmp/ro"
+    run 0 env INTEGRITY_KEY="$tmp/ro/key" INTEGRITY_DB="$tmp/ro.db" "$cli" init "$tmp/a.log"
+    assert "warning: cannot record the store signature"
+    run 0 env INTEGRITY_KEY="$tmp/ro/key" INTEGRITY_DB="$tmp/ro.db" "$cli" check "$tmp/a.log"
+    chmod 700 "$tmp/ro"
+  fi
   unset INTEGRITY_KEY
 
   # --- cases where the three must agree -----------------------------------------
@@ -434,7 +464,7 @@ EOF
     [ -z "$(find "$tmp" -maxdepth 1 -name 'mv.db*')" ] || fail "failed rename left a store or temp file"
   fi
 
-  rm -rf "$tmp" "$tmp.ref" "$tmp.key" "$tmp.key2" "$tmp.key3"
+  rm -rf "$tmp" "$tmp".* # keys and their .last records sit beside $tmp
   echo "ok: $impl"
 done
 
@@ -501,6 +531,6 @@ else
     cmp -s <(sort "$tmp.db.${BUILT[0]//\//_}") <(sort "$tmp.db.${impl//\//_}") ||
       fail "implementations disagree on the store (hash, metadata or signature)"
   done
-  rm -rf "$tmp" "$tmp.key" "$tmp".db.*
+  rm -rf "$tmp" "$tmp".*
   echo "ok: implementations agree, signatures included"
 fi

@@ -62,6 +62,11 @@ being overwritten. A signed store without a key, a key with an unsigned store, a
 key file are all errors. So is a key that other users can read or write, or that belongs to
 another user who isn't root: `chmod 600` it, as with an ssh key.
 
+Each signed write also records the store's signature in `$INTEGRITY_KEY.last`, and every
+read checks it, so an older signed store put back in place is refused. To restore a backup on
+purpose, delete that store's line from the `.last` file. When the file can't be written,
+for example with the key on read-only media, `init` and `update` warn and carry on.
+
 Signing only helps if the key sits somewhere the attacker can't reach: another host, a
 root-owned path, removable media. Keep it outside the monitored tree too, or it shows up as
 `Untracked` on every check. [docs/threat-model.md](docs/threat-model.md) lists what signing

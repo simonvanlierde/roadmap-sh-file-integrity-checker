@@ -303,6 +303,18 @@ fn load_text(db: &Path) -> Option<String> {
             if !subtle_eq(sig.as_bytes(), mac(key, body).as_bytes()) {
                 die("store signature mismatch: the baseline itself was tampered with");
             }
+            // An older store signed with the same key also passes the HMAC; the record catches
+            // it. No record line means a store from before records existed, or one that could
+            // not be written.
+            if recorded()
+                .get(&*db.to_string_lossy())
+                .is_some_and(|last| last != sig)
+            {
+                die(&format!(
+                    "store signature is not the latest one recorded in {}: the store was rolled back or replaced",
+                    last_path().display()
+                ));
+            }
         }
         (None, None) => {}
     }
@@ -333,16 +345,71 @@ fn parse(text: &str) -> impl Iterator<Item = (Cow<'_, str>, Entry<'_>)> {
         })
 }
 
+/// The record next to the key: "<signature>\t<store path>" per signed store, the latest
+/// write's.
+fn last_path() -> PathBuf {
+    let mut p = env::var_os("INTEGRITY_KEY").unwrap_or_default();
+    p.push(".last");
+    PathBuf::from(p)
+}
+
+/// The latest signature of each signed store, by store path.
+fn recorded() -> BTreeMap<String, String> {
+    let path = last_path();
+    match fs::read_to_string(&path) {
+        Ok(text) => text
+            .lines()
+            .map(|l| {
+                let (sig, store) = l.split_once('\t').unwrap_or((l, ""));
+                (store.to_owned(), sig.to_owned())
+            })
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => die(&format!("cannot read {}: {}", path.display(), e)),
+    }
+}
+
+/// Record `sig` as this store's latest signature, or warn when the record cannot be written.
+fn record(db: &Path, sig: &str) {
+    let last = last_path();
+    let mut entries = recorded();
+    entries.insert(db.to_string_lossy().into_owned(), sig.to_owned());
+    let body: String = entries
+        .iter()
+        .map(|(p, s)| format!("{}\t{}\n", s, p))
+        .collect();
+    let mut tmp = last.clone().into_os_string();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let _ = fs::remove_file(&tmp);
+    let write = || -> std::io::Result<()> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?
+            .write_all(body.as_bytes())?;
+        fs::rename(&tmp, &last)
+    };
+    if write().is_err() {
+        let _ = fs::remove_file(&tmp);
+        eprintln!(
+            "warning: cannot record the store signature in {}, so a rolled-back store will go unnoticed",
+            last.display()
+        );
+    }
+}
+
 fn save(store: &Store<'_>, db: &Path) {
     use std::fmt::Write as _;
     let mut body = format!("{}\n", HEADER);
     for (path, (hash, size, mtime)) in store {
         let _ = writeln!(body, "{}\t{}\t{}\t{}", hash, size, mtime, path);
     }
-    if let Some(key) = read_key(true) {
-        let sig = mac(&key, &body); // ends the borrow of body before it grows
+    let sig = read_key(true).map(|key| mac(&key, &body));
+    if let Some(sig) = &sig {
         body.push_str(SIGTAG);
-        body.push_str(&sig);
+        body.push_str(sig);
         body.push('\n');
     }
     let name = db
@@ -367,6 +434,9 @@ fn save(store: &Store<'_>, db: &Path) {
         let _ = fs::remove_file(&tmp);
         die(&format!("{}: {}", db.display(), e));
     });
+    if let Some(sig) = sig {
+        record(db, &sig);
+    }
 }
 
 /// Constant-time comparison, so verification does not leak the expected digest.
