@@ -155,6 +155,14 @@ def verified(raw: bytes, lines: list[str]) -> list[str]:
     return lines
 
 
+def number(s: str, *, signed: bool = False) -> int:
+    """Parse ASCII digits as rust and bash do; int() alone also takes " 12", "+5" and "1_0"."""
+    d = s.removeprefix("-") if signed else s
+    if not (d.isascii() and d.isdigit()):
+        raise ValueError(s)
+    return int(s)
+
+
 def load() -> Entries | None:
     """Read the store, or return None when it does not exist yet."""
     if not os.path.exists(DB):
@@ -183,7 +191,7 @@ def load() -> Entries | None:
         if line and not line.startswith("#"):
             try:
                 digest, size, mtime, path = line.split("\t", 3)
-                entries[path] = (digest, int(size), int(mtime))
+                entries[path] = (digest, number(size), number(mtime, signed=True))
             except ValueError:
                 die(f"malformed store line: {line}")
     return entries

@@ -168,7 +168,8 @@ db_entries() { # <dest>: verified entry lines of the store, signature and commen
 		function emit(line,   f) { # by-value param: the caller keeps its \r
 			sub(/\r$/, "", line)
 			if (line == "" || line ~ /^#/) return
-			if (split(line, f, "\t") != 4) bail("malformed store line: " line)
+			# size and mtime are ASCII digits, mtime maybe negative, as in python and rust
+			if (split(line, f, "\t") != 4 || f[2] !~ /^[0-9]+$/ || f[3] !~ /^-?[0-9]+$/) bail("malformed store line: " line)
 			print line > ents
 		}
 		NR == 1 { h = $0; sub(/\r$/, "", h); if (h != hdr) bail("unsupported store: expected \"" hdr "\" header") }
