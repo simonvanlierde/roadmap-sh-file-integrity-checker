@@ -165,11 +165,19 @@ db_entries() { # <dest>: verified entry lines of the store, signature and commen
   # \r is stripped for comparisons and emitted entries; the signature covers raw bytes.
   sig=$(awk -v hdr="$HEADER" -v sigtag="$SIGTAG" -v ents="$ents" '
 		function bail(msg) { print "error: " msg > "/dev/stderr"; bad = 1; exit 2 }
+		# |d| above max, compared as text: awk numbers are doubles and lose precision
+		function over(d, max) {
+			sub(/^-?0*/, "", d)
+			return length(d) > length(max) || (length(d) == length(max) && d "" > max "")
+		}
 		function emit(line,   f) { # by-value param: the caller keeps its \r
 			sub(/\r$/, "", line)
 			if (line == "" || line ~ /^#/) return
-			# size and mtime are ASCII digits, mtime maybe negative, as in python and rust
-			if (split(line, f, "\t") != 4 || f[2] !~ /^[0-9]+$/ || f[3] !~ /^-?[0-9]+$/) bail("malformed store line: " line)
+			# size and mtime are ASCII digits, mtime maybe negative, as in python and rust,
+			# and fit the u64 and i64 that rust parses them into
+			if (split(line, f, "\t") != 4 || f[2] !~ /^[0-9]+$/ || f[3] !~ /^-?[0-9]+$/ ||
+				over(f[2], "18446744073709551615") ||
+				over(f[3], f[3] ~ /^-/ ? "9223372036854775808" : "9223372036854775807")) bail("malformed store line: " line)
 			print line > ents
 		}
 		NR == 1 { h = $0; sub(/\r$/, "", h); if (h != hdr) bail("unsupported store: expected \"" hdr "\" header") }

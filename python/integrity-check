@@ -156,11 +156,17 @@ def verified(raw: bytes, lines: list[str]) -> list[str]:
 
 
 def number(s: str, *, signed: bool = False) -> int:
-    """Parse ASCII digits as rust and bash do; int() alone also takes " 12", "+5" and "1_0"."""
+    """Parse ASCII digits into rust's i64 (signed) or u64, as rust and bash do.
+
+    int() alone also takes " 12", "+5" and "1_0", and any size.
+    """
     d = s.removeprefix("-") if signed else s
     if not (d.isascii() and d.isdigit()):
         raise ValueError(s)
-    return int(s)
+    n = int(s)
+    if not (-(2**63) <= n < 2**63 if signed else n < 2**64):
+        raise ValueError(s)
+    return n
 
 
 def load() -> Entries | None:
