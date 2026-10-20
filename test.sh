@@ -117,7 +117,7 @@ for impl in "${BUILT[@]}"; do
   run 2 "$cli" init "$tmp/ghost"
   assert "no such file"
 
-  # whitespace filenames survive the pipeline (bash used to mangle multi-space names)
+  # whitespace filenames survive the pipeline, runs of spaces included
   printf 'sp\n' >"$tmp/two  spaces.log"
   printf 'sp\n' >"$tmp/trail .log"
   run 0 "$cli" update "$tmp"
@@ -126,7 +126,7 @@ for impl in "${BUILT[@]}"; do
   assert "two  spaces.log: Modified (hash mismatch)"
   run 0 "$cli" update "$tmp"
 
-  # a deleted tree reports Missing, not Untracked, and never leaks other dirs (bash awk join bug)
+  # a deleted tree reports Missing, not Untracked, and never pulls in other dirs
   mkdir "$tmp/gone" && printf 'g\n' >"$tmp/gone/g.log"
   run 0 "$cli" update "$tmp/gone"
   rm "$tmp/gone/g.log"
@@ -142,7 +142,7 @@ for impl in "${BUILT[@]}"; do
   run 0 "$cli" check "$tmp/gone"
   rmdir "$tmp/gone"
 
-  # init of an empty dir must not drop the rest of the baseline (bash merge bug)
+  # init of an empty dir must not drop the rest of the baseline
   before=$(grep -cv '^#' "$INTEGRITY_DB")
   mkdir "$tmp/empty"
   run 0 "$cli" init "$tmp/empty"
@@ -168,12 +168,19 @@ for impl in "${BUILT[@]}"; do
   run 0 "$cli" init "$other"
   run 0 "$cli" check "$tmp"
   run 0 "$cli" check "$other"
+  run 0 "$cli" check --fast "$other"
+  assert "o.log: Unmodified"
   rm -rf "$other"
 
   # malformed store lines and unknown versions fail loudly
   cp "$INTEGRITY_DB" "$tmp/db.bak"
   printf 'garbage line\n' >>"$INTEGRITY_DB"
   run 2 "$cli" check "$tmp"
+  assert "malformed store line"
+  # check keeps only the entries under its target, but still validates the rest
+  cp "$tmp/db.bak" "$INTEGRITY_DB"
+  printf '%064d\t12x\t1\t/elsewhere/f.log\n' 0 >>"$INTEGRITY_DB"
+  run 2 "$cli" check --fast "$tmp"
   assert "malformed store line"
   sed '1s/v2/v99/' "$tmp/db.bak" >"$INTEGRITY_DB"
   run 2 "$cli" check "$tmp"
@@ -230,6 +237,21 @@ for impl in "${BUILT[@]}"; do
   run 2 env INTEGRITY_KEY="$tmp/gone" "$cli" check "$tmp"
   assert "key file not found"
   refute "tampered" # a key problem must not be reported as a tampered baseline
+  # an empty key signs nothing: refuse it rather than sign with it or drop the signature
+  : >"$tmp.empty"
+  run 2 env INTEGRITY_KEY="$tmp.empty" INTEGRITY_DB="$tmp/ek.db" "$cli" init "$tmp/a.log"
+  assert "key file is empty"
+  [ ! -e "$tmp/ek.db" ] || fail "stored a baseline with an empty key"
+  rm "$tmp.empty"
+  # a key other users can read or replace is refused, as ssh refuses such a private key
+  cp "$INTEGRITY_KEY" "$tmp.open"
+  chmod 644 "$tmp.open"
+  run 2 env INTEGRITY_KEY="$tmp.open" "$cli" check "$tmp"
+  assert "open to other users"
+  chmod 620 "$tmp.open"
+  run 2 env INTEGRITY_KEY="$tmp.open" "$cli" check "$tmp"
+  assert "open to other users"
+  rm "$tmp.open"
   run 2 env -u INTEGRITY_KEY "$cli" check "$tmp"
   assert "store is signed"
   # an unreadable key must abort, not sign a fresh store with nothing
@@ -249,10 +271,10 @@ for impl in "${BUILT[@]}"; do
   assert "signature mismatch"
   unset INTEGRITY_KEY
 
-  # --- cases the three used to disagree on --------------------------------------
+  # --- cases where the three must agree -----------------------------------------
   export INTEGRITY_DB="$tmp/parity.db" # fresh: the store above is deliberately tampered
 
-  # tab/newline filenames are refused by name, before hashing (used to diverge per port)
+  # tab/newline filenames are refused by name, before hashing
   bad=$tmp/bad
   mkdir "$bad"
   printf 'x' >"$bad/$(printf 'has\ttab')"
@@ -263,8 +285,8 @@ for impl in "${BUILT[@]}"; do
   run 2 "$cli" init "$bad"
   assert "unsupported filename (tab or newline)"
 
-  # 0x0B ends a line for python's splitlines() but not for rust or awk; python alone
-  # used to reject a store the other two had just written
+  # 0x0B ends a line for python's splitlines() but not for rust or awk, so python must
+  # not split on it, or it rejects a store the other two just wrote
   vt=$tmp/vt
   mkdir "$vt"
   printf 'x' >"$vt/$(printf 'a\vb').log"
@@ -290,6 +312,11 @@ for impl in "${BUILT[@]}"; do
   INTEGRITY_DB="$glob/log[1].db" "$cli" init "$glob" >/dev/null
   INTEGRITY_DB="$glob/log[1].db" "$cli" init "$glob" >/dev/null
   [ "$(grep -cv '^#' "$glob/log[1].db")" = 1 ] || fail "store tracked itself: $(cat "$glob/log[1].db")"
+  # nor when the store is the target itself
+  INTEGRITY_DB="$glob/log[1].db" "$cli" init "$glob/log[1].db" >/dev/null
+  [ "$(grep -cv '^#' "$glob/log[1].db")" = 1 ] || fail "store tracked itself: $(cat "$glob/log[1].db")"
+  # JOBS in the environment is someone else's setting
+  run 0 env JOBS=auto INTEGRITY_DB="$glob/log[1].db" "$cli" init "$glob"
 
   # the store-level cases below need a plain filename: against $vt they would exit 2
   # for the 0x0B reason and test nothing
@@ -297,20 +324,20 @@ for impl in "${BUILT[@]}"; do
   mkdir "$plain"
   printf 'x' >"$plain/p.log"
 
-  # a non-UTF-8 store is refused with one message by all three (used to diverge)
+  # a non-UTF-8 store is refused with one message by all three
   printf '#integrity-check v2\n%064d\t1\t1\t/tmp/bad\xffname.log\n' 0 >"$INTEGRITY_DB"
   run 2 "$cli" check "$plain"
   assert "store is not valid UTF-8"
 
   # size and mtime are plain ASCII digits (mtime may be negative); python's int() and
-  # rust's parse() used to accept some of these and bash checked none of them
+  # rust's parse() alone accept some of these
   for sm in ' 12	1' '+5	1' '1_0	1' '-1	1' '١٢	1' '	1' '1	 1' '1	+1' '1	1_0' '1	--1' '1	'; do
     printf '#integrity-check v2\n%064d\t%s\t%s\n' 0 "$sm" "$plain/p.log" >"$INTEGRITY_DB"
     run 2 "$cli" check "$plain"
     assert "malformed store line"
   done
 
-  # size fits a u64 and mtime an i64, as in rust; bash and python used to take any length
+  # size fits a u64 and mtime an i64, as in rust; bash and python check the length too
   for sm in '18446744073709551616	1' '99999999999999999999	1' '1	9223372036854775808' \
     '1	-9223372036854775809' '0018446744073709551616	1'; do
     printf '#integrity-check v2\n%064d\t%s\t%s\n' 0 "$sm" "$plain/p.log" >"$INTEGRITY_DB"
@@ -352,7 +379,7 @@ for impl in "${BUILT[@]}"; do
   assert "signature mismatch"
   unset INTEGRITY_KEY
   # An empty signature line carries no signature: the store is unsigned, so it passes
-  # without a key and is refused as unsigned with one. Rust used to call it signed.
+  # without a key and is refused as unsigned with one.
   rm -f "$INTEGRITY_DB"
   run 0 "$cli" init "$plain"
   printf '#hmac-sha256 \n' >>"$INTEGRITY_DB"
@@ -361,7 +388,7 @@ for impl in "${BUILT[@]}"; do
   run 2 env INTEGRITY_KEY="$tmp.key2" "$cli" check "$plain"
   assert "store is unsigned"
 
-  # bash without perl skips the UTF-8 check with a warning; under set -u it used to abort.
+  # bash without perl skips the UTF-8 check with a warning instead of aborting.
   # perl shares /usr/bin with the rest, so PATH gets a dir of links to everything else.
   if [ "$impl" = bash/integrity-check ]; then
     noperl=$tmp/noperl
@@ -416,7 +443,7 @@ done
 tmp=$(mktemp -d "$TMPDIR/integrity.XXXXXX")
 impl=python/integrity-check
 python3 - "$PWD/$impl" "$tmp" <<'EOF' || fail "replaced-file handling"
-import hashlib, importlib.machinery, importlib.util, os, sys
+import hashlib, importlib.machinery, importlib.util, os, signal, sys
 loader = importlib.machinery.SourceFileLoader("ic", sys.argv[1])
 ic = importlib.util.module_from_spec(importlib.util.spec_from_loader("ic", loader))
 loader.exec_module(ic)
@@ -428,6 +455,7 @@ with open(p + ".new", "w") as f:
     f.write("new")
 os.replace(p + ".new", p)
 assert ic.sha256(p, st) == hashlib.sha256(b"new").hexdigest(), "save-by-rename not hashed"
+assert ic.under("/etc/hosts", "/") and ic.under("/a/b", "/a/") and not ic.under("/ab", "/a"), "under"
 # the target exists before p is removed, so it cannot reuse p's inode number
 st = os.lstat(p)
 with open(os.path.join(sys.argv[2], "t"), "w") as f:
@@ -440,6 +468,21 @@ except SystemExit as e:
     assert e.code == 2, e.code
 else:
     raise AssertionError("symlink swap was hashed")
+# a FIFO swapped in is refused at once; the alarm kills a run that waits for a writer
+os.remove(p)
+with open(p, "w") as f:
+    f.write("x")
+st = os.lstat(p)
+os.mkfifo(p + ".fifo")
+os.replace(p + ".fifo", p)
+signal.alarm(5)
+try:
+    ic.sha256(p, st)
+except SystemExit as e:
+    assert e.code == 2, e.code
+else:
+    raise AssertionError("fifo swap was hashed")
+signal.alarm(0)
 EOF
 rm -rf "$tmp"
 echo "ok: python replaced-file handling"
@@ -451,7 +494,7 @@ else
   tmp=$(mktemp -d "$TMPDIR/integrity.XXXXXX")
   printf 'shared\n' >"$tmp/x.log"
   printf 'sp\n' >"$tmp/two  spaces.log"
-  head -c 32 /dev/urandom >"$tmp.key"
+  (umask 077 && head -c 32 /dev/urandom >"$tmp.key") # a hand-made key must be private too
   export INTEGRITY_KEY="$tmp.key"
   for impl in "${BUILT[@]}"; do
     INTEGRITY_DB="$tmp.db.${impl//\//_}" "$PWD/$impl" init "$tmp" >/dev/null

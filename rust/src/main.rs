@@ -32,7 +32,8 @@ fn or_die<T, E: std::fmt::Display>(r: Result<T, E>, p: &Path) -> T {
 
 /// Whether `p` is `prefix` itself or sits inside it. One definition for check and prune.
 fn under(p: &str, prefix: &str) -> bool {
-    p == prefix || (p.starts_with(prefix) && p.as_bytes().get(prefix.len()) == Some(&b'/'))
+    let base = prefix.trim_end_matches('/'); // "/" holds everything
+    p == prefix || (p.starts_with(base) && p.as_bytes().get(base.len()) == Some(&b'/'))
 }
 
 /// The store key for a path: UTF-8, or it is not representable in the store.
@@ -106,7 +107,15 @@ fn collect(target: &Path) -> Vec<(PathBuf, fs::Metadata)> {
 
 /// `md` is the file's metadata from the walk.
 fn sha256(path: &Path, md: &fs::Metadata) -> String {
-    let mut file = or_die(File::open(path), path);
+    // O_NONBLOCK: a FIFO swapped in opens at once and is refused below, instead of
+    // waiting for a writer. Regular-file reads ignore the flag.
+    let mut file = or_die(
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path),
+        path,
+    );
     // A save-by-rename swaps the inode after the walk, which is fine while the path
     // still names the regular file we opened; anything else (a symlink) is refused.
     let now = or_die(file.metadata(), path);
@@ -205,26 +214,49 @@ fn read_key(create: bool) -> Option<Vec<u8>> {
             die(&format!("key file not found: {}", path.display()));
         }
         let mut key = [0u8; 32];
-        File::open("/dev/urandom")
-            .unwrap()
-            .read_exact(&mut key)
-            .unwrap();
+        let urandom = Path::new("/dev/urandom");
+        or_die(
+            File::open(urandom).and_then(|mut f| f.read_exact(&mut key)),
+            urandom,
+        );
         or_die(
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .open(&path),
+                .open(&path)
+                .and_then(|mut f| f.write_all(&key)),
             &path,
-        )
-        .write_all(&key)
-        .unwrap();
+        );
         println!(
             "Generated signing key {}. Keep it off the monitored host.",
             path.display()
         );
     }
-    Some(or_die(fs::read(&path), &path))
+    let mut key = Vec::new();
+    let md = or_die(
+        File::open(&path).and_then(|mut f| f.read_to_end(&mut key).and(f.metadata())),
+        &path,
+    );
+    if key.is_empty() {
+        die(&format!("key file is empty: {}", path.display()));
+    }
+    // anyone else who can read the key can forge a store, and anyone who can write it can swap it
+    if md.mode() & 0o077 != 0 {
+        die(&format!(
+            "key file is open to other users (mode {:o}): {}",
+            md.mode() & 0o7777,
+            path.display()
+        ));
+    }
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    if md.uid() != unsafe { libc::geteuid() } && md.uid() != 0 {
+        die(&format!(
+            "key file belongs to another user: {}",
+            path.display()
+        ));
+    }
+    Some(key)
 }
 
 /// Hex HMAC-SHA256 of a store body.
@@ -277,9 +309,9 @@ fn load_text(db: &Path) -> Option<String> {
     Some(text)
 }
 
-/// Parse authenticated store text. Entries borrow from `text` (no allocation per line),
-/// and collect() bulk-builds the tree from the already-sorted input.
-fn parse(text: &str) -> Store<'_> {
+/// Parse authenticated store text, validating every line. Entries borrow from `text` (no
+/// allocation per line); the caller filters before collect() bulk-builds the tree.
+fn parse(text: &str) -> impl Iterator<Item = (Cow<'_, str>, Entry<'_>)> {
     text.lines()
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(|line| {
@@ -299,7 +331,6 @@ fn parse(text: &str) -> Store<'_> {
             let mtime = mtime.parse().unwrap_or_else(|_| malformed());
             (Cow::Borrowed(path), (Cow::Borrowed(h), size, mtime))
         })
-        .collect()
 }
 
 fn save(store: &Store<'_>, db: &Path) {
@@ -346,7 +377,10 @@ fn subtle_eq(a: &[u8], b: &[u8]) -> bool {
 // --- commands ------------------------------------------------------------------
 fn cmd_store(action: &str, target: &Path, db: &Path) -> i32 {
     let text = load_text(db);
-    let mut store: Store = text.as_deref().map(parse).unwrap_or_default();
+    let mut store: Store = text
+        .as_deref()
+        .map(|t| parse(t).collect())
+        .unwrap_or_default();
     let fresh = scan(target, db, None);
     let prefix = utf8(&abspath(target));
     // drop vanished entries under the target (else Missing forever); keep the rest
@@ -369,13 +403,10 @@ fn cmd_check(target: &Path, db: &Path, fast: bool) -> i32 {
             db.display()
         ))
     });
-    let baseline = parse(&text);
     let prefix = utf8(&abspath(target));
-    let current = scan(target, db, if fast { Some(&baseline) } else { None });
-    let stored: Store = baseline
-        .into_iter()
-        .filter(|(p, _)| under(p, &prefix))
-        .collect();
+    // A scan only finds paths under the target, so the rest of the store is never looked up.
+    let stored: Store = parse(&text).filter(|(p, _)| under(p, &prefix)).collect();
+    let current = scan(target, db, if fast { Some(&stored) } else { None });
 
     let mut lines = Vec::new();
     let mut bad = 0;
@@ -427,4 +458,64 @@ fn main() {
         "check" => cmd_check(&target, &db, fast),
         action => cmd_store(action, &target, &db),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sha256, under};
+    use std::fs;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// A FIFO swapped in after the scan must be refused at once, not waited on. sha256 exits
+    /// the process, so the case runs in a child copy of this test binary.
+    #[test]
+    fn fifo_swapped_in_is_refused() {
+        if let Some(dir) = std::env::var_os("FIFO_CASE_DIR") {
+            let p = std::path::Path::new(&dir).join("f");
+            fs::write(&p, "x").unwrap();
+            let md = fs::symlink_metadata(&p).unwrap();
+            let fifo = p.with_extension("fifo");
+            assert!(Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success());
+            fs::rename(&fifo, &p).unwrap();
+            sha256(&p, &md);
+            unreachable!("sha256 hashed a fifo");
+        }
+        let dir = std::env::temp_dir().join(format!("ic-fifo-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::fifo_swapped_in_is_refused",
+                "--nocapture",
+            ])
+            .env("FIFO_CASE_DIR", &dir)
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break Some(s);
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                child.kill().unwrap();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        fs::remove_dir_all(&dir).unwrap();
+        let status = status.expect("sha256 blocked on the fifo");
+        assert_eq!(status.code(), Some(2));
+    }
+
+    #[test]
+    fn under_matches_whole_components() {
+        assert!(under("/etc/hosts", "/"));
+        assert!(under("/a/b", "/a") && under("/a", "/a"));
+        assert!(!under("/ab", "/a"));
+    }
 }

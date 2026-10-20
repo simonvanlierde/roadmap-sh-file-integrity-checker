@@ -9,6 +9,10 @@ import os
 import stat
 import sys
 
+TYPE_CHECKING = False  # the typing module costs startup time; checkers read this name alone
+if TYPE_CHECKING:
+    from typing import NoReturn
+
 Entries = dict[str, tuple[str, int, int]]
 
 HEADER = "#integrity-check v2"
@@ -19,15 +23,15 @@ JOBS = os.cpu_count() or 4
 NARGS = 2  # <action> <target>
 
 
-def die(msg: str) -> None:
-    """Report an error on stderr and exit 2. Never returns."""
+def die(msg: str) -> NoReturn:
+    """Report an error on stderr and exit 2."""
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(2)
 
 
 def under(path: str, prefix: str) -> bool:
     """Whether path is prefix itself or sits inside it. One definition for check and prune."""
-    return path == prefix or path.startswith(prefix + os.sep)
+    return path == prefix or path.startswith(prefix.rstrip(os.sep) + os.sep)  # "/" holds everything
 
 
 def check_name(path: str) -> None:
@@ -79,7 +83,9 @@ def sha256(path: str, st: os.stat_result) -> str:
     """Return the hex SHA-256 of a file, read in 1 MB chunks. st is its stat from the walk."""
     h = hashlib.sha256()
     try:
-        with open(path, "rb") as f:
+        # O_NONBLOCK: a FIFO swapped in opens at once and is refused below, instead of
+        # waiting for a writer. Regular-file reads ignore the flag.
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), "rb") as f:
             # A save-by-rename swaps the inode after the walk, which is fine while the path
             # still names the regular file we opened; anything else (a symlink) is refused.
             now = os.fstat(f.fileno())
@@ -108,7 +114,8 @@ def scan(target: str, baseline: Entries | None = None) -> Entries:
             fresh = dict(zip(todo, pool.map(sha256, todo, [found[p] for p in todo])))
     else:
         fresh = {p: sha256(p, found[p]) for p in todo}
-    return {p: (fresh.get(p) or baseline[p][0], *meta[p]) for p in meta}
+    # a path skips hashing only when a baseline is set
+    return {p: (fresh.get(p) or baseline[p][0], *meta[p]) for p in meta}  # ty: ignore[not-subscriptable]
 
 
 def read_key(*, create: bool = False) -> bytes | None:
@@ -124,10 +131,18 @@ def read_key(*, create: bool = False) -> bytes | None:
                 f.write(os.urandom(32))
             print(f"Generated signing key {KEYFILE}. Keep it off the monitored host.")
         with open(KEYFILE, "rb") as f:
-            return f.read()
+            st = os.fstat(f.fileno())
+            key = f.read()
     except OSError as e:
         die(f"{KEYFILE}: {e.strerror}")
-        return None  # unreachable: die() exits
+    if not key:
+        die(f"key file is empty: {KEYFILE}")
+    # anyone else who can read the key can forge a store, and anyone who can write it can swap it
+    if st.st_mode & 0o077:
+        die(f"key file is open to other users (mode {st.st_mode & 0o7777:o}): {KEYFILE}")
+    if st.st_uid not in (os.geteuid(), 0):
+        die(f"key file belongs to another user: {KEYFILE}")
+    return key
 
 
 def mac(key: bytes, body: bytes) -> str:
@@ -145,7 +160,7 @@ def verified(raw: bytes, lines: list[str]) -> list[str]:
         die("store is signed but INTEGRITY_KEY is not set")
     if key and not sig:
         die("INTEGRITY_KEY is set but the store is unsigned; re-run init")
-    if key:
+    if key and sig:  # past the two checks above, key implies sig
         # The signature covers the raw bytes of every line but its own; rejoining decoded
         # lines would rewrite \r\n as \n and accept a line-ending change.
         end = raw[:-1] if raw.endswith(b"\n") else raw
@@ -169,8 +184,8 @@ def number(s: str, *, signed: bool = False) -> int:
     return n
 
 
-def load() -> Entries | None:
-    """Read the store, or return None when it does not exist yet."""
+def load(prefix: str | None = None) -> Entries | None:
+    """Read the store, or return None when it does not exist yet. See parse() for prefix."""
     if not os.path.exists(DB):
         return None
     try:
@@ -191,15 +206,21 @@ def load() -> Entries | None:
         lines = [x.removesuffix("\r") for x in lines]
     if not lines or lines[0] != HEADER:
         die(f'unsupported store: expected "{HEADER}" header')
+    return parse(verified(raw, lines), prefix)
 
+
+def parse(lines: list[str], prefix: str | None) -> Entries:
+    """Validate every store line; with a prefix, keep only the entries under it."""
     entries = {}
-    for line in verified(raw, lines):
+    for line in lines:
         if line and not line.startswith("#"):
             try:
                 digest, size, mtime, path = line.split("\t", 3)
-                entries[path] = (digest, number(size), number(mtime, signed=True))
+                entry = (digest, number(size), number(mtime, signed=True))
             except ValueError:
                 die(f"malformed store line: {line}")
+            if prefix is None or under(path, prefix):
+                entries[path] = entry
     return entries
 
 
@@ -239,12 +260,11 @@ def cmd_store(action: str, target: str) -> int:
 
 def cmd_check(target: str, *, fast: bool) -> int:
     """Compare target against the baseline; return 1 when anything differs."""
-    baseline = load()
-    if baseline is None:
+    # A scan only finds paths under the target, so the rest of the store is never looked up.
+    stored = load(os.path.abspath(target))
+    if stored is None:
         die(f"no baseline at {DB}, run 'init' first")
-    prefix = os.path.abspath(target)
-    current = scan(target, baseline if fast else None)
-    stored = {p: e for p, e in baseline.items() if under(p, prefix)}
+    current = scan(target, stored if fast else None)
 
     lines, bad = [], 0
     for path, entry in current.items():
@@ -283,5 +303,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")
+    sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")  # ty: ignore[unresolved-attribute]
     sys.exit(main(sys.argv))
