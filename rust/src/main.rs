@@ -253,7 +253,12 @@ fn load_text(db: &Path) -> Option<String> {
             HEADER
         ));
     }
-    let sig = text.lines().last().and_then(|l| l.strip_prefix(SIGTAG));
+    // an empty signature is no signature, as in bash and python
+    let sig = text
+        .lines()
+        .last()
+        .and_then(|l| l.strip_prefix(SIGTAG))
+        .filter(|s| !s.is_empty());
     let key = read_key(false);
     match (sig, &key) {
         (Some(_), None) => die("store is signed but INTEGRITY_KEY is not set"),
@@ -285,6 +290,11 @@ fn parse(text: &str) -> Store<'_> {
             else {
                 malformed()
             };
+            // ASCII digits only, as in bash and python: parse() also takes a leading '+'
+            let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+            if !digits(size) || !digits(mtime.strip_prefix('-').unwrap_or(mtime)) {
+                malformed()
+            }
             let size = size.parse().unwrap_or_else(|_| malformed());
             let mtime = mtime.parse().unwrap_or_else(|_| malformed());
             (Cow::Borrowed(path), (Cow::Borrowed(h), size, mtime))

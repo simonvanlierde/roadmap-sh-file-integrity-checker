@@ -302,6 +302,14 @@ for impl in "${BUILT[@]}"; do
   run 2 "$cli" check "$plain"
   assert "store is not valid UTF-8"
 
+  # size and mtime are plain ASCII digits (mtime may be negative); python's int() and
+  # rust's parse() used to accept some of these and bash checked none of them
+  for sm in ' 12	1' '+5	1' '1_0	1' '-1	1' '١٢	1' '	1' '1	 1' '1	+1' '1	1_0' '1	--1' '1	'; do
+    printf '#integrity-check v2\n%064d\t%s\t%s\n' 0 "$sm" "$plain/p.log" >"$INTEGRITY_DB"
+    run 2 "$cli" check "$plain"
+    assert "malformed store line"
+  done
+
   # the signature covers the store's raw bytes: rewriting line endings under it must fail
   rm -f "$INTEGRITY_DB"
   export INTEGRITY_KEY="$tmp.key2"
@@ -318,6 +326,15 @@ for impl in "${BUILT[@]}"; do
   run 2 "$cli" check "$plain"
   assert "signature mismatch"
   unset INTEGRITY_KEY
+  # An empty signature line carries no signature: the store is unsigned, so it passes
+  # without a key and is refused as unsigned with one. Rust used to call it signed.
+  rm -f "$INTEGRITY_DB"
+  run 0 "$cli" init "$plain"
+  printf '#hmac-sha256 \n' >>"$INTEGRITY_DB"
+  run 0 "$cli" check "$plain"
+  assert "p.log: Unmodified"
+  run 2 env INTEGRITY_KEY="$tmp.key2" "$cli" check "$plain"
+  assert "store is unsigned"
 
   # bash without iconv skips the UTF-8 check with a warning; under set -u it used to abort.
   # iconv shares /usr/bin with the rest, so PATH gets a dir of links to everything else.
