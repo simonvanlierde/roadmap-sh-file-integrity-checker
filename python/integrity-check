@@ -19,6 +19,7 @@ HEADER = "#integrity-check v2"
 SIG = "#hmac-sha256 "
 DB = os.path.abspath(os.environ.get("INTEGRITY_DB") or ".integrity.db")
 KEYFILE = os.environ.get("INTEGRITY_KEY")
+LAST = f"{KEYFILE}.last"  # "<signature>\t<store path>" per signed store, the latest write's
 JOBS = os.cpu_count() or 4
 NARGS = 2  # <action> <target>
 
@@ -167,7 +168,43 @@ def verified(raw: bytes, lines: list[str]) -> list[str]:
         # compare bytes: compare_digest raises TypeError on a non-ASCII str
         if not hmac.compare_digest(sig.encode(), mac(key, raw[: end.rfind(b"\n") + 1]).encode()):
             die("store signature mismatch: the baseline itself was tampered with")
+        # An older store signed with the same key also passes the HMAC; the record catches it.
+        # No record line means a store from before records existed, or one that could not be
+        # written.
+        last = recorded().get(DB)
+        if last and last != sig:
+            die(f"store signature is not the latest one recorded in {LAST}: the store was rolled back or replaced")
     return lines
+
+
+def recorded() -> dict[str, str]:
+    """Return the latest signature of each signed store, by store path."""
+    try:
+        with open(LAST, encoding="utf-8", errors="surrogateescape") as f:
+            return {path: sig for sig, _, path in (line.rstrip("\n").partition("\t") for line in f)}
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        die(f"cannot read {LAST}: {e.strerror}")
+
+
+def record(sig: str) -> None:
+    """Record sig as this store's latest signature, or warn when the record cannot be written."""
+    entries = recorded()
+    entries[DB] = sig
+    tmp = f"{LAST}.{os.getpid()}.tmp"
+    unlink(tmp)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write("".join(f"{s}\t{p}\n" for p, s in sorted(entries.items())))
+        os.replace(tmp, LAST)
+    except OSError:
+        unlink(tmp)
+        print(
+            f"warning: cannot record the store signature in {LAST}, so a rolled-back store will go unnoticed",
+            file=sys.stderr,
+        )
 
 
 def number(s: str, *, signed: bool = False) -> int:
@@ -228,19 +265,21 @@ def save(entries: Entries) -> int:
     """Write the store atomically, signed when a key is configured, and return the entry count."""
     body = HEADER + "\n" + "".join(f"{e[0]}\t{e[1]}\t{e[2]}\t{p}\n" for p, e in sorted(entries.items()))
     key = read_key(create=True)
+    sig = mac(key, body.encode("utf-8", "surrogateescape")) if key else ""  # signs the bytes on disk
     tmp = f"{DB}.{os.getpid()}.tmp"
     unlink(tmp)  # stale leftover from a crashed run; O_EXCL still rules below
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write(body)
-            if key:
-                # sign the bytes that land on disk
-                f.write(SIG + mac(key, body.encode("utf-8", "surrogateescape")) + "\n")
+            if sig:
+                f.write(SIG + sig + "\n")
         os.replace(tmp, DB)
     except OSError as e:
         unlink(tmp)
         die(f"{DB}: {e.strerror}")
+    if sig:
+        record(sig)
     return len(entries)
 
 

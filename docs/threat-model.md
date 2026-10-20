@@ -28,6 +28,7 @@ can read the key or change the environment the checker runs in (`INTEGRITY_DB`,
 | Defence | Stops | Where |
 | --- | --- | --- |
 | HMAC over the store | Edited, added or removed entries; a stripped signature (an error when a key is set); a changed line ending. Each exits 2. | sh `db_entries`, py `verified`, rs `load_text` |
+| Record of the latest signature next to the key | An older store, signed with the same key, put back in place: exit 2. The record holds one line per store path, so one key can sign several stores. | sh `db_entries` and `record_sig`, py `verified` and `record`, rs `load_text` and `record` |
 | Read the store once | Forged entries passing with a genuine signature, by renaming a different store in between two reads. All three verify and parse one copy of the bytes. | sh `db_entries`, py `load`, rs `load_text` |
 | Verify before writing | `init` and `update` read and check the old store before they rewrite it, so a forged store is never signed. | `cmd_store` |
 | Constant-time compare | Learning the expected signature from timing. bash compares both values hashed under a fresh random nonce. | sh `db_entries`, py `verified`, rs `subtle_eq` |
@@ -52,9 +53,9 @@ can read the key or change the environment the checker runs in (`INTEGRITY_DB`,
 
 ## Known gaps
 
-1. **Rollback.** The signature has no counter or date, so an attacker who can write the
-   store can put back an older store signed with the same key. Together with an old
-   version of a file, this passes as `Unmodified`, exit 0.
+1. **Rollback without a record.** When the record next to the key can't be written, `init`
+   and `update` only warn, and an older signed store put back passes as `Unmodified`. The
+   same holds for a store last written before records existed.
 2. **bash: the window between check and open stays.** `stat -L` and `sha256sum` follow the
    path again, so a symlink or another file swapped in after the scan is hashed without
    notice (sh `scan`).

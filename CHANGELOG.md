@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Rollback detection. Each signed write records the store's signature in
+  `$INTEGRITY_KEY.last`, and every read refuses a store whose signature isn't the latest
+  one recorded. Before, an older signed store put back together with an older file passed
+  as `Unmodified`.
+
 ## [0.1.0] - 2026-10-21
 
 ### Added
@@ -18,4 +27,5 @@ All notable changes to this project are documented here. The format follows
   you or root.
 - A threat model in [docs/threat-model.md](docs/threat-model.md).
 
+[Unreleased]: https://github.com/simonvanlierde/roadmap-sh-file-integrity-checker/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/simonvanlierde/roadmap-sh-file-integrity-checker/releases/tag/v0.1.0
