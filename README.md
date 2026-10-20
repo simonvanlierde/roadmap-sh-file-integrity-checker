@@ -14,6 +14,11 @@ python/integrity-check                # python 3, stdlib only
 rust/target/release/integrity-check   # cargo build --release --manifest-path rust/Cargo.toml
 ```
 
+Each [release](https://github.com/simonvanlierde/roadmap-sh-file-integrity-checker/releases)
+also has the Rust binary for Linux (x86_64, arm64) and macOS (arm64). macOS quarantines a
+binary downloaded in a browser: clear that with `xattr -d com.apple.quarantine
+integrity-check`.
+
 ## Usage
 
 ```console
@@ -78,6 +83,22 @@ and the other defences stop, and what they don't.
 makes it a weaker check: anything that can write a file can usually also put its size and
 mtime back (`touch -r`). I'd use `--fast` for a frequent cron sweep and plain `check` for the
 audit that matters.
+
+## Running it from cron
+
+Cron mails whatever a job prints, so print only when something is off:
+
+```text
+MAILTO=you@example.com
+INTEGRITY_DB=/home/you/.integrity.db
+INTEGRITY_KEY=/media/usb/integrity.key
+# --fast every hour, a full check at 03:15
+0 * * * *  out=$(/usr/local/bin/integrity-check check --fast /home/you/notes 2>&1) || printf 'exit %s\n%s\n' "$?" "$out"
+15 3 * * * out=$(/usr/local/bin/integrity-check check /home/you/notes 2>&1) || printf 'exit %s\n%s\n' "$?" "$out"
+```
+
+A clean run sends nothing. Exit 1 means files changed, exit 2 means the check itself failed,
+for example on a tampered or rolled-back store.
 
 ## Tests and benchmarks
 
