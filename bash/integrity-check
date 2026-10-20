@@ -174,10 +174,10 @@ db_entries() { # <dest>: verified entry lines of the store, signature and commen
 			sub(/\r$/, "", line)
 			if (line == "" || line ~ /^#/) return
 			# size and mtime are ASCII digits, mtime maybe negative, as in python and rust,
-			# and fit the u64 and i64 that rust parses them into
+			# and fit the u64 and i64 that rust parses them into (shorter ones always fit)
 			if (split(line, f, "\t") != 4 || f[2] !~ /^[0-9]+$/ || f[3] !~ /^-?[0-9]+$/ ||
-				over(f[2], "18446744073709551615") ||
-				over(f[3], f[3] ~ /^-/ ? "9223372036854775808" : "9223372036854775807")) bail("malformed store line: " line)
+				length(f[2]) > 19 && over(f[2], "18446744073709551615") ||
+				length(f[3]) > 18 && over(f[3], f[3] ~ /^-/ ? "9223372036854775808" : "9223372036854775807")) bail("malformed store line: " line)
 			print line > ents
 		}
 		NR == 1 { h = $0; sub(/\r$/, "", h); if (h != hdr) bail("unsupported store: expected \"" hdr "\" header") }
@@ -214,9 +214,10 @@ write_db() { # stdin: entry lines
   trap 'rm -f "$body"' EXIT
   (umask 077 && set -C && {
     echo "$HEADER"
-    # count entries as they stream past, for cmd_store
-    LC_ALL=C sort -t$'\t' -k4 | awk -v cnt="$WORK/n" '{ print; n++ } END { print n + 0 >cnt }'
+    LC_ALL=C sort -t$'\t' -k4
   } >"$body") || die "cannot write store next to $DB"
+  # Count afterwards: an awk counting between sort and the file doubled the write time.
+  echo $(($(wc -l <"$body") - 1)) >"$WORK/n" # entries, for cmd_store
   if [ -n "$KEYFILE" ]; then
     if [ ! -f "$KEYFILE" ]; then
       (umask 077 && set -C && head -c 32 /dev/urandom >"$KEYFILE") ||
@@ -245,11 +246,16 @@ scan() {
     die "scan failed under $1"
 
   if [ -n "${2:-}" ]; then
-    awk -F'\t' -v reuse="$reuse" -v tohash="$tohash" -v dbf="$2" '
-			FILENAME == dbf { h[$4] = $1; sm[$4] = $2 "\t" $3; next }
-			($3 in h) && sm[$3] == $1 "\t" $2 { print h[$3] "\t" $0 >reuse; next }
-			{ print $3 >tohash }
-		' "$2" "$meta"
+    # Index the scan, not the store: a 10-file target in a 50k-entry store keeps 10 entries.
+    # The last store line for a path wins, as in python and rust.
+    awk -F'\t' -v reuse="$reuse" -v tohash="$tohash" -v metaf="$meta" '
+			FILENAME == metaf { m[$3] = $1 "\t" $2; next }
+			$4 in m { h[$4] = $1; sm[$4] = $2 "\t" $3 }
+			END {
+				for (p in m)
+					if ((p in h) && sm[p] == m[p]) print h[p] "\t" m[p] "\t" p >reuse
+					else print p >tohash
+			}' "$meta" "$2"
   else
     cut -f3 "$meta" >"$tohash"
   fi

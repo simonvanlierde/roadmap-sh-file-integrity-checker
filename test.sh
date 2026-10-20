@@ -168,12 +168,19 @@ for impl in "${BUILT[@]}"; do
   run 0 "$cli" init "$other"
   run 0 "$cli" check "$tmp"
   run 0 "$cli" check "$other"
+  run 0 "$cli" check --fast "$other"
+  assert "o.log: Unmodified"
   rm -rf "$other"
 
   # malformed store lines and unknown versions fail loudly
   cp "$INTEGRITY_DB" "$tmp/db.bak"
   printf 'garbage line\n' >>"$INTEGRITY_DB"
   run 2 "$cli" check "$tmp"
+  assert "malformed store line"
+  # check keeps only the entries under its target, but still validates the rest
+  cp "$tmp/db.bak" "$INTEGRITY_DB"
+  printf '%064d\t12x\t1\t/elsewhere/f.log\n' 0 >>"$INTEGRITY_DB"
+  run 2 "$cli" check --fast "$tmp"
   assert "malformed store line"
   sed '1s/v2/v99/' "$tmp/db.bak" >"$INTEGRITY_DB"
   run 2 "$cli" check "$tmp"

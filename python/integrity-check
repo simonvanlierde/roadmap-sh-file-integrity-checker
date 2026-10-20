@@ -9,6 +9,10 @@ import os
 import stat
 import sys
 
+TYPE_CHECKING = False  # the typing module costs startup time; checkers read this name alone
+if TYPE_CHECKING:
+    from typing import NoReturn
+
 Entries = dict[str, tuple[str, int, int]]
 
 HEADER = "#integrity-check v2"
@@ -19,8 +23,8 @@ JOBS = os.cpu_count() or 4
 NARGS = 2  # <action> <target>
 
 
-def die(msg: str) -> None:
-    """Report an error on stderr and exit 2. Never returns."""
+def die(msg: str) -> NoReturn:
+    """Report an error on stderr and exit 2."""
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(2)
 
@@ -108,7 +112,8 @@ def scan(target: str, baseline: Entries | None = None) -> Entries:
             fresh = dict(zip(todo, pool.map(sha256, todo, [found[p] for p in todo])))
     else:
         fresh = {p: sha256(p, found[p]) for p in todo}
-    return {p: (fresh.get(p) or baseline[p][0], *meta[p]) for p in meta}
+    # a path skips hashing only when a baseline is set
+    return {p: (fresh.get(p) or baseline[p][0], *meta[p]) for p in meta}  # ty: ignore[not-subscriptable]
 
 
 def read_key(*, create: bool = False) -> bytes | None:
@@ -127,7 +132,6 @@ def read_key(*, create: bool = False) -> bytes | None:
             return f.read()
     except OSError as e:
         die(f"{KEYFILE}: {e.strerror}")
-        return None  # unreachable: die() exits
 
 
 def mac(key: bytes, body: bytes) -> str:
@@ -145,7 +149,7 @@ def verified(raw: bytes, lines: list[str]) -> list[str]:
         die("store is signed but INTEGRITY_KEY is not set")
     if key and not sig:
         die("INTEGRITY_KEY is set but the store is unsigned; re-run init")
-    if key:
+    if key and sig:  # past the two checks above, key implies sig
         # The signature covers the raw bytes of every line but its own; rejoining decoded
         # lines would rewrite \r\n as \n and accept a line-ending change.
         end = raw[:-1] if raw.endswith(b"\n") else raw
@@ -169,8 +173,8 @@ def number(s: str, *, signed: bool = False) -> int:
     return n
 
 
-def load() -> Entries | None:
-    """Read the store, or return None when it does not exist yet."""
+def load(prefix: str | None = None) -> Entries | None:
+    """Read the store, or return None when it does not exist yet. See parse() for prefix."""
     if not os.path.exists(DB):
         return None
     try:
@@ -191,15 +195,21 @@ def load() -> Entries | None:
         lines = [x.removesuffix("\r") for x in lines]
     if not lines or lines[0] != HEADER:
         die(f'unsupported store: expected "{HEADER}" header')
+    return parse(verified(raw, lines), prefix)
 
+
+def parse(lines: list[str], prefix: str | None) -> Entries:
+    """Validate every store line; with a prefix, keep only the entries under it."""
     entries = {}
-    for line in verified(raw, lines):
+    for line in lines:
         if line and not line.startswith("#"):
             try:
                 digest, size, mtime, path = line.split("\t", 3)
-                entries[path] = (digest, number(size), number(mtime, signed=True))
+                entry = (digest, number(size), number(mtime, signed=True))
             except ValueError:
                 die(f"malformed store line: {line}")
+            if prefix is None or under(path, prefix):
+                entries[path] = entry
     return entries
 
 
@@ -239,12 +249,11 @@ def cmd_store(action: str, target: str) -> int:
 
 def cmd_check(target: str, *, fast: bool) -> int:
     """Compare target against the baseline; return 1 when anything differs."""
-    baseline = load()
-    if baseline is None:
+    # A scan only finds paths under the target, so the rest of the store is never looked up.
+    stored = load(os.path.abspath(target))
+    if stored is None:
         die(f"no baseline at {DB}, run 'init' first")
-    prefix = os.path.abspath(target)
-    current = scan(target, baseline if fast else None)
-    stored = {p: e for p, e in baseline.items() if under(p, prefix)}
+    current = scan(target, stored if fast else None)
 
     lines, bad = [], 0
     for path, entry in current.items():
@@ -283,5 +292,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")
+    sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")  # ty: ignore[unresolved-attribute]
     sys.exit(main(sys.argv))

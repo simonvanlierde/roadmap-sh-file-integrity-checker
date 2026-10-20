@@ -277,9 +277,9 @@ fn load_text(db: &Path) -> Option<String> {
     Some(text)
 }
 
-/// Parse authenticated store text. Entries borrow from `text` (no allocation per line),
-/// and collect() bulk-builds the tree from the already-sorted input.
-fn parse(text: &str) -> Store<'_> {
+/// Parse authenticated store text, validating every line. Entries borrow from `text` (no
+/// allocation per line); the caller filters before collect() bulk-builds the tree.
+fn parse(text: &str) -> impl Iterator<Item = (Cow<'_, str>, Entry<'_>)> {
     text.lines()
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(|line| {
@@ -299,7 +299,6 @@ fn parse(text: &str) -> Store<'_> {
             let mtime = mtime.parse().unwrap_or_else(|_| malformed());
             (Cow::Borrowed(path), (Cow::Borrowed(h), size, mtime))
         })
-        .collect()
 }
 
 fn save(store: &Store<'_>, db: &Path) {
@@ -346,7 +345,10 @@ fn subtle_eq(a: &[u8], b: &[u8]) -> bool {
 // --- commands ------------------------------------------------------------------
 fn cmd_store(action: &str, target: &Path, db: &Path) -> i32 {
     let text = load_text(db);
-    let mut store: Store = text.as_deref().map(parse).unwrap_or_default();
+    let mut store: Store = text
+        .as_deref()
+        .map(|t| parse(t).collect())
+        .unwrap_or_default();
     let fresh = scan(target, db, None);
     let prefix = utf8(&abspath(target));
     // drop vanished entries under the target (else Missing forever); keep the rest
@@ -369,13 +371,10 @@ fn cmd_check(target: &Path, db: &Path, fast: bool) -> i32 {
             db.display()
         ))
     });
-    let baseline = parse(&text);
     let prefix = utf8(&abspath(target));
-    let current = scan(target, db, if fast { Some(&baseline) } else { None });
-    let stored: Store = baseline
-        .into_iter()
-        .filter(|(p, _)| under(p, &prefix))
-        .collect();
+    // A scan only finds paths under the target, so the rest of the store is never looked up.
+    let stored: Store = parse(&text).filter(|(p, _)| under(p, &prefix)).collect();
+    let current = scan(target, db, if fast { Some(&stored) } else { None });
 
     let mut lines = Vec::new();
     let mut bad = 0;
