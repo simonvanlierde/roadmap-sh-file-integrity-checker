@@ -117,7 +117,7 @@ for impl in "${BUILT[@]}"; do
   run 2 "$cli" init "$tmp/ghost"
   assert "no such file"
 
-  # whitespace filenames survive the pipeline (bash used to mangle multi-space names)
+  # whitespace filenames survive the pipeline, runs of spaces included
   printf 'sp\n' >"$tmp/two  spaces.log"
   printf 'sp\n' >"$tmp/trail .log"
   run 0 "$cli" update "$tmp"
@@ -126,7 +126,7 @@ for impl in "${BUILT[@]}"; do
   assert "two  spaces.log: Modified (hash mismatch)"
   run 0 "$cli" update "$tmp"
 
-  # a deleted tree reports Missing, not Untracked, and never leaks other dirs (bash awk join bug)
+  # a deleted tree reports Missing, not Untracked, and never pulls in other dirs
   mkdir "$tmp/gone" && printf 'g\n' >"$tmp/gone/g.log"
   run 0 "$cli" update "$tmp/gone"
   rm "$tmp/gone/g.log"
@@ -142,7 +142,7 @@ for impl in "${BUILT[@]}"; do
   run 0 "$cli" check "$tmp/gone"
   rmdir "$tmp/gone"
 
-  # init of an empty dir must not drop the rest of the baseline (bash merge bug)
+  # init of an empty dir must not drop the rest of the baseline
   before=$(grep -cv '^#' "$INTEGRITY_DB")
   mkdir "$tmp/empty"
   run 0 "$cli" init "$tmp/empty"
@@ -262,10 +262,10 @@ for impl in "${BUILT[@]}"; do
   assert "signature mismatch"
   unset INTEGRITY_KEY
 
-  # --- cases the three used to disagree on --------------------------------------
+  # --- cases where the three must agree -----------------------------------------
   export INTEGRITY_DB="$tmp/parity.db" # fresh: the store above is deliberately tampered
 
-  # tab/newline filenames are refused by name, before hashing (used to diverge per port)
+  # tab/newline filenames are refused by name, before hashing
   bad=$tmp/bad
   mkdir "$bad"
   printf 'x' >"$bad/$(printf 'has\ttab')"
@@ -276,8 +276,8 @@ for impl in "${BUILT[@]}"; do
   run 2 "$cli" init "$bad"
   assert "unsupported filename (tab or newline)"
 
-  # 0x0B ends a line for python's splitlines() but not for rust or awk; python alone
-  # used to reject a store the other two had just written
+  # 0x0B ends a line for python's splitlines() but not for rust or awk, so python must
+  # not split on it, or it rejects a store the other two just wrote
   vt=$tmp/vt
   mkdir "$vt"
   printf 'x' >"$vt/$(printf 'a\vb').log"
@@ -315,20 +315,20 @@ for impl in "${BUILT[@]}"; do
   mkdir "$plain"
   printf 'x' >"$plain/p.log"
 
-  # a non-UTF-8 store is refused with one message by all three (used to diverge)
+  # a non-UTF-8 store is refused with one message by all three
   printf '#integrity-check v2\n%064d\t1\t1\t/tmp/bad\xffname.log\n' 0 >"$INTEGRITY_DB"
   run 2 "$cli" check "$plain"
   assert "store is not valid UTF-8"
 
   # size and mtime are plain ASCII digits (mtime may be negative); python's int() and
-  # rust's parse() used to accept some of these and bash checked none of them
+  # rust's parse() alone accept some of these
   for sm in ' 12	1' '+5	1' '1_0	1' '-1	1' '١٢	1' '	1' '1	 1' '1	+1' '1	1_0' '1	--1' '1	'; do
     printf '#integrity-check v2\n%064d\t%s\t%s\n' 0 "$sm" "$plain/p.log" >"$INTEGRITY_DB"
     run 2 "$cli" check "$plain"
     assert "malformed store line"
   done
 
-  # size fits a u64 and mtime an i64, as in rust; bash and python used to take any length
+  # size fits a u64 and mtime an i64, as in rust; bash and python check the length too
   for sm in '18446744073709551616	1' '99999999999999999999	1' '1	9223372036854775808' \
     '1	-9223372036854775809' '0018446744073709551616	1'; do
     printf '#integrity-check v2\n%064d\t%s\t%s\n' 0 "$sm" "$plain/p.log" >"$INTEGRITY_DB"
@@ -370,7 +370,7 @@ for impl in "${BUILT[@]}"; do
   assert "signature mismatch"
   unset INTEGRITY_KEY
   # An empty signature line carries no signature: the store is unsigned, so it passes
-  # without a key and is refused as unsigned with one. Rust used to call it signed.
+  # without a key and is refused as unsigned with one.
   rm -f "$INTEGRITY_DB"
   run 0 "$cli" init "$plain"
   printf '#hmac-sha256 \n' >>"$INTEGRITY_DB"
@@ -379,7 +379,7 @@ for impl in "${BUILT[@]}"; do
   run 2 env INTEGRITY_KEY="$tmp.key2" "$cli" check "$plain"
   assert "store is unsigned"
 
-  # bash without perl skips the UTF-8 check with a warning; under set -u it used to abort.
+  # bash without perl skips the UTF-8 check with a warning instead of aborting.
   # perl shares /usr/bin with the rest, so PATH gets a dir of links to everything else.
   if [ "$impl" = bash/integrity-check ]; then
     noperl=$tmp/noperl

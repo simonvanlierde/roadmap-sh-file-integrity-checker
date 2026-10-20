@@ -50,18 +50,23 @@ Location: `$INTEGRITY_DB`, default `./.integrity.db`. One line per file, sorted 
 ```
 
 Size and mtime are plain ASCII digits, and mtime may start with `-`. Size must fit an
-unsigned 64-bit integer and mtime a signed one; any other line is malformed. A `#hmac-sha256` line with nothing after it is no signature, so that store counts
-as unsigned. Each write is atomic, with mode 0600. The store cannot hold a filename that contains a tab, a
-newline or invalid UTF-8, so all three versions refuse such a name before they hash anything.
-bash needs `perl` for that check.
+unsigned 64-bit integer and mtime a signed one. Any other line is malformed, wherever it
+sits in the store. A `#hmac-sha256` line with nothing after it is no signature, so that
+store counts as unsigned.
+
+Each write is atomic, with mode 0600.
+
+The store cannot hold a filename that contains a tab, a newline or invalid UTF-8, so all
+three versions refuse such a name before they hash anything. bash needs `perl` for that
+check.
 
 ## Signing the store
 
 Set `$INTEGRITY_KEY` to a key file, and the tool signs the store with an HMAC-SHA256 over its
 contents. If the key file does not exist, the first `init` creates it: 32 random bytes, mode
 0600. Every later read checks the signature first, so a tampered baseline aborts instead of
-being overwritten. A signed store with no key set is an error, and so is a key set against an
-unsigned store.
+being overwritten. These are errors: a signed store with no key set, a key set against an
+unsigned store, and an empty key file.
 
 Signing only helps if the key sits somewhere the attacker can't reach: another host, a
 root-owned path, removable media. Keep it outside the monitored tree too, or it shows up as
@@ -77,9 +82,12 @@ audit that matters.
 ## Tests and benchmarks
 
 `./test.sh` runs one scenario against each built binary and checks that all three write
-byte-identical stores, signature included. `./difftest.sh` runs all three on 50 random trees
-and fails, naming the seed, on the first difference in exit code or output. `./bench.sh` writes [BENCHMARKS.md](BENCHMARKS.md)
-and needs [hyperfine](https://github.com/sharkdp/hyperfine).
+byte-identical stores, signature included. `./difftest.sh` runs all three on 50 random trees.
+It stops at the first difference in exit code or output and names the seed.
+`cargo test --manifest-path rust/Cargo.toml` runs the Rust unit tests.
+
+`./bench.sh` writes [BENCHMARKS.md](BENCHMARKS.md) and needs
+[hyperfine](https://github.com/sharkdp/hyperfine).
 
 ## License
 
