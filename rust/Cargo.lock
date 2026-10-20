@@ -87,6 +87,7 @@ name = "integrity-check"
 version = "0.1.0"
 dependencies = [
  "hmac",
+ "libc",
  "sha2",
 ]
 

@@ -59,7 +59,8 @@ Set `$INTEGRITY_KEY` to a key file, and the tool signs the store with an HMAC-SH
 contents. If the key file does not exist, the first `init` creates it: 32 random bytes, mode
 0600. Every later read checks the signature first, so a tampered baseline aborts instead of
 being overwritten. A signed store without a key, a key with an unsigned store, and an empty
-key file are all errors.
+key file are all errors. So is a key that other users can read or write, or that belongs to
+another user who isn't root: `chmod 600` it, as with an ssh key.
 
 Signing only helps if the key sits somewhere the attacker can't reach: another host, a
 root-owned path, removable media. Keep it outside the monitored tree too, or it shows up as

@@ -107,7 +107,15 @@ fn collect(target: &Path) -> Vec<(PathBuf, fs::Metadata)> {
 
 /// `md` is the file's metadata from the walk.
 fn sha256(path: &Path, md: &fs::Metadata) -> String {
-    let mut file = or_die(File::open(path), path);
+    // O_NONBLOCK: a FIFO swapped in opens at once and is refused below, instead of
+    // waiting for a writer. Regular-file reads ignore the flag.
+    let mut file = or_die(
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path),
+        path,
+    );
     // A save-by-rename swaps the inode after the walk, which is fine while the path
     // still names the regular file we opened; anything else (a symlink) is refused.
     let now = or_die(file.metadata(), path);
@@ -225,9 +233,28 @@ fn read_key(create: bool) -> Option<Vec<u8>> {
             path.display()
         );
     }
-    let key = or_die(fs::read(&path), &path);
+    let mut key = Vec::new();
+    let md = or_die(
+        File::open(&path).and_then(|mut f| f.read_to_end(&mut key).and(f.metadata())),
+        &path,
+    );
     if key.is_empty() {
         die(&format!("key file is empty: {}", path.display()));
+    }
+    // anyone else who can read the key can forge a store, and anyone who can write it can swap it
+    if md.mode() & 0o077 != 0 {
+        die(&format!(
+            "key file is open to other users (mode {:o}): {}",
+            md.mode() & 0o7777,
+            path.display()
+        ));
+    }
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    if md.uid() != unsafe { libc::geteuid() } && md.uid() != 0 {
+        die(&format!(
+            "key file belongs to another user: {}",
+            path.display()
+        ));
     }
     Some(key)
 }
@@ -435,7 +462,55 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::under;
+    use super::{sha256, under};
+    use std::fs;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// A FIFO swapped in after the scan must be refused at once, not waited on. sha256 exits
+    /// the process, so the case runs in a child copy of this test binary.
+    #[test]
+    fn fifo_swapped_in_is_refused() {
+        if let Some(dir) = std::env::var_os("FIFO_CASE_DIR") {
+            let p = std::path::Path::new(&dir).join("f");
+            fs::write(&p, "x").unwrap();
+            let md = fs::symlink_metadata(&p).unwrap();
+            let fifo = p.with_extension("fifo");
+            assert!(Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success());
+            fs::rename(&fifo, &p).unwrap();
+            sha256(&p, &md);
+            unreachable!("sha256 hashed a fifo");
+        }
+        let dir = std::env::temp_dir().join(format!("ic-fifo-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::fifo_swapped_in_is_refused",
+                "--nocapture",
+            ])
+            .env("FIFO_CASE_DIR", &dir)
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break Some(s);
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                child.kill().unwrap();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        fs::remove_dir_all(&dir).unwrap();
+        let status = status.expect("sha256 blocked on the fifo");
+        assert_eq!(status.code(), Some(2));
+    }
 
     #[test]
     fn under_matches_whole_components() {

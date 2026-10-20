@@ -243,6 +243,15 @@ for impl in "${BUILT[@]}"; do
   assert "key file is empty"
   [ ! -e "$tmp/ek.db" ] || fail "stored a baseline with an empty key"
   rm "$tmp.empty"
+  # a key other users can read or replace is refused, as ssh refuses such a private key
+  cp "$INTEGRITY_KEY" "$tmp.open"
+  chmod 644 "$tmp.open"
+  run 2 env INTEGRITY_KEY="$tmp.open" "$cli" check "$tmp"
+  assert "open to other users"
+  chmod 620 "$tmp.open"
+  run 2 env INTEGRITY_KEY="$tmp.open" "$cli" check "$tmp"
+  assert "open to other users"
+  rm "$tmp.open"
   run 2 env -u INTEGRITY_KEY "$cli" check "$tmp"
   assert "store is signed"
   # an unreadable key must abort, not sign a fresh store with nothing
@@ -434,7 +443,7 @@ done
 tmp=$(mktemp -d "$TMPDIR/integrity.XXXXXX")
 impl=python/integrity-check
 python3 - "$PWD/$impl" "$tmp" <<'EOF' || fail "replaced-file handling"
-import hashlib, importlib.machinery, importlib.util, os, sys
+import hashlib, importlib.machinery, importlib.util, os, signal, sys
 loader = importlib.machinery.SourceFileLoader("ic", sys.argv[1])
 ic = importlib.util.module_from_spec(importlib.util.spec_from_loader("ic", loader))
 loader.exec_module(ic)
@@ -459,6 +468,21 @@ except SystemExit as e:
     assert e.code == 2, e.code
 else:
     raise AssertionError("symlink swap was hashed")
+# a FIFO swapped in is refused at once; the alarm kills a run that waits for a writer
+os.remove(p)
+with open(p, "w") as f:
+    f.write("x")
+st = os.lstat(p)
+os.mkfifo(p + ".fifo")
+os.replace(p + ".fifo", p)
+signal.alarm(5)
+try:
+    ic.sha256(p, st)
+except SystemExit as e:
+    assert e.code == 2, e.code
+else:
+    raise AssertionError("fifo swap was hashed")
+signal.alarm(0)
 EOF
 rm -rf "$tmp"
 echo "ok: python replaced-file handling"
@@ -470,7 +494,7 @@ else
   tmp=$(mktemp -d "$TMPDIR/integrity.XXXXXX")
   printf 'shared\n' >"$tmp/x.log"
   printf 'sp\n' >"$tmp/two  spaces.log"
-  head -c 32 /dev/urandom >"$tmp.key"
+  (umask 077 && head -c 32 /dev/urandom >"$tmp.key") # a hand-made key must be private too
   export INTEGRITY_KEY="$tmp.key"
   for impl in "${BUILT[@]}"; do
     INTEGRITY_DB="$tmp.db.${impl//\//_}" "$PWD/$impl" init "$tmp" >/dev/null

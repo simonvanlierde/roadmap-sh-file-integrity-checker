@@ -22,8 +22,10 @@ fi
 # pre-1970 fractional mtimes.
 if stat -f '%z' . >/dev/null 2>&1; then
   STAT=(stat -L -f '%z %m %N') # BSD
+  KEYSTAT=(stat -L -f '%Lp %u')
 else
   STAT=(stat -L -c '%s %Y %n') # GNU
+  KEYSTAT=(stat -L -c '%a %u')
 fi
 
 die() {
@@ -126,6 +128,11 @@ need_key() {
   [ -f "$KEYFILE" ] || die "key file not found: $KEYFILE"
   [ -r "$KEYFILE" ] || die "cannot read key file: $KEYFILE"
   [ -s "$KEYFILE" ] || die "key file is empty: $KEYFILE"
+  local perm owner
+  read -r perm owner < <("${KEYSTAT[@]}" "$KEYFILE")
+  # anyone else who can read the key can forge a store, and anyone who can write it can swap it
+  [ $((8#$perm & 8#077)) -eq 0 ] || die "key file is open to other users (mode $perm): $KEYFILE"
+  [ "$owner" = "$(id -u)" ] || [ "$owner" = 0 ] || die "key file belongs to another user: $KEYFILE"
 }
 
 key_hex() { # hex of the key file; call need_key first
