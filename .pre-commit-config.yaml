@@ -1,13 +1,13 @@
 # Run with: prek run --all-files   (install the git hook with: prek install)
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.0
+    rev: v0.17.0
     hooks:
       - id: ruff-check
       - id: ruff-format
 
   - repo: https://github.com/scop/pre-commit-shfmt
-    rev: v3.13.1-1
+    rev: v3.14.1-1
     hooks:
       - id: shfmt
 
