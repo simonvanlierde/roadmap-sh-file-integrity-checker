@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 # NOTE: the "asm" feature is what buys the hardware SHA-2 path; the pure-Rust
 # default backend is ~5x slower here. Drop it when moving to sha2 0.11 backends.
-hmac = "0.12"
+hmac = "0.13"
 # geteuid and O_NONBLOCK, which std does not expose; already in the tree through sha2
 libc = "0.2"
 sha2 = { version = "0.10", features = ["asm"] }
