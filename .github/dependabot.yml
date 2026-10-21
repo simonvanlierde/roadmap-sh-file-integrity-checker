@@ -1,0 +1,35 @@
+# Weekly version updates, grouped as in project-templates. `cooldown` holds an update back until
+# the release has been public for a week (a month for a major), long enough for a compromised
+# release to be caught and yanked. Security updates ignore it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+    cooldown: {default-days: 7}
+    groups:
+      actions: {patterns: ["*"]}
+
+  # Version updates only: Dependabot has no security updates for hook revs.
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule: {interval: weekly}
+    cooldown: {default-days: 7}
+    groups:
+      hooks: {patterns: ["*"]}
+
+  # Dev tooling lands as one PR and runtime minor and patch bumps as another, so a risky bump is
+  # not buried in lint-tool churn. A runtime major gets its own PR.
+  - package-ecosystem: cargo
+    directory: /rust
+    schedule: {interval: weekly}
+    cooldown: {default-days: 7, semver-major-days: 30}
+    groups:
+      runtime:
+        dependency-type: production
+        update-types: [minor, patch]
+        patterns: ["*"]
+      dev-tooling:
+        dependency-type: development
+        update-types: [minor, patch]
+        patterns: ["*"]
