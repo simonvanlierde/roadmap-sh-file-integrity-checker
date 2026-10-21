@@ -1,5 +1,5 @@
 //! File integrity checker. Store v2: "<sha256>\t<size>\t<mtime>\t<path>" per line.
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -134,7 +134,7 @@ fn sha256(path: &Path, md: &fs::Metadata) -> String {
         }
         hasher.update(&buf[..n]);
     }
-    format!("{:x}", hasher.finalize())
+    hex(&hasher.finalize())
 }
 
 /// Hash `paths` in parallel, in order. Workers pull indices off a shared cursor so one
@@ -263,7 +263,12 @@ fn read_key(create: bool) -> Option<Vec<u8>> {
 fn mac(key: &[u8], body: &str) -> String {
     let mut m = <Hmac<Sha256>>::new_from_slice(key).unwrap();
     m.update(body.as_bytes());
-    format!("{:x}", m.finalize().into_bytes())
+    hex(&m.finalize().into_bytes())
+}
+
+/// Lower-case hex; digest 0.11 output arrays have no `LowerHex`.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // --- store ---------------------------------------------------------------------
