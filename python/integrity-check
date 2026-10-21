@@ -188,9 +188,18 @@ def recorded() -> dict[str, str]:
         die(f"cannot read {LAST}: {e.strerror}")
 
 
-def record(sig: str) -> None:
-    """Record sig as this store's latest signature, or warn when the record cannot be written."""
+NO_RECORD = "cannot record the store signature in {}, so a rolled-back store will go unnoticed"
+
+
+def record_tmp(sig: str) -> str | None:
+    """Write the next record, with sig for this store, to a temp file and return its path.
+
+    Returns None, with a warning, when it can't be written and the record holds no line for
+    this store. Exits instead when it does: a new store under that old line would read as
+    rolled back on every later check, and init could not repair it.
+    """
     entries = recorded()
+    had = DB in entries
     entries[DB] = sig
     tmp = f"{LAST}.{os.getpid()}.tmp"
     unlink(tmp)
@@ -198,13 +207,13 @@ def record(sig: str) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write("".join(f"{s}\t{p}\n" for p, s in sorted(entries.items())))
-        os.replace(tmp, LAST)
     except OSError:
         unlink(tmp)
-        print(
-            f"warning: cannot record the store signature in {LAST}, so a rolled-back store will go unnoticed",
-            file=sys.stderr,
-        )
+        if had:
+            die(f"cannot update the signature record in {LAST}, so the store was left unchanged")
+        print(f"warning: {NO_RECORD.format(LAST)}", file=sys.stderr)
+        return None
+    return tmp
 
 
 def number(s: str, *, signed: bool = False) -> int:
@@ -266,6 +275,7 @@ def save(entries: Entries) -> int:
     body = HEADER + "\n" + "".join(f"{e[0]}\t{e[1]}\t{e[2]}\t{p}\n" for p, e in sorted(entries.items()))
     key = read_key(create=True)
     sig = mac(key, body.encode("utf-8", "surrogateescape")) if key else ""  # signs the bytes on disk
+    rec = record_tmp(sig) if sig else None  # before the store changes; see record_tmp
     tmp = f"{DB}.{os.getpid()}.tmp"
     unlink(tmp)  # stale leftover from a crashed run; O_EXCL still rules below
     try:
@@ -278,8 +288,12 @@ def save(entries: Entries) -> int:
     except OSError as e:
         unlink(tmp)
         die(f"{DB}: {e.strerror}")
-    if sig:
-        record(sig)
+    if rec:
+        try:
+            os.replace(rec, LAST)
+        except OSError:
+            unlink(rec)
+            print(f"warning: {NO_RECORD.format(LAST)}", file=sys.stderr)
     return len(entries)
 
 

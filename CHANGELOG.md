@@ -11,7 +11,8 @@ All notable changes to this project are documented here. The format follows
 - Rollback detection. Each signed write records the store's signature in
   `$INTEGRITY_KEY.last`, and every read refuses a store whose signature isn't the latest
   one recorded. Before, an older signed store put back together with an older file passed
-  as `Unmodified`.
+  as `Unmodified`. If the record can't be written, `init` and `update` warn, or stop with
+  exit 2 when the record already has a line for that store.
 - Prebuilt Rust binaries for Linux (x86_64, arm64) and macOS (arm64) on each release.
 - A README example that runs the checker from cron and mails only on a change or a failure.
 

@@ -54,8 +54,9 @@ can read the key or change the environment the checker runs in (`INTEGRITY_DB`,
 ## Known gaps
 
 1. **Rollback without a record.** When the record next to the key can't be written, `init`
-   and `update` only warn, and an older signed store put back passes as `Unmodified`. The
-   same holds for a store last written before records existed.
+   and `update` only warn if the record has no line for the store yet, and an older signed
+   store put back then passes as `Unmodified`. The same holds for a store last written
+   before records existed.
 2. **bash: the window between check and open stays.** `stat -L` and `sha256sum` follow the
    path again, so a symlink or another file swapped in after the scan is hashed without
    notice (sh `scan`).
