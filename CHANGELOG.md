@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-21
+
 ### Added
 
 - Rollback detection. Each signed write records the store's signature in
@@ -30,5 +32,6 @@ All notable changes to this project are documented here. The format follows
   you or root.
 - A threat model in [docs/threat-model.md](docs/threat-model.md).
 
-[Unreleased]: https://github.com/simonvanlierde/roadmap-sh-file-integrity-checker/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/simonvanlierde/roadmap-sh-file-integrity-checker/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/simonvanlierde/roadmap-sh-file-integrity-checker/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/simonvanlierde/roadmap-sh-file-integrity-checker/releases/tag/v0.1.0
