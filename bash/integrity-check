@@ -222,16 +222,20 @@ db_entries() { # <dest>: verified entry lines of the store, signature and commen
   fi
 }
 
-record_sig() { # <signature>: record it as this store's latest, next to the key
+record_tmp() { # <signature>: write the next record to $LAST.$$.tmp; fails when it can't
   local tmp=$LAST.$$.tmp
   rm -f "$tmp"
-  if ! (umask 077 && set -C && {
+  (umask 077 && set -C && {
     [ ! -f "$LAST" ] || awk -v db="$DB" '{ t = index($0, "\t") } substr($0, t + 1) != db' "$LAST"
     printf '%s\t%s\n' "$1" "$DB"
-  } | LC_ALL=C sort -t$'\t' -k2 >"$tmp") 2>/dev/null || ! mv "$tmp" "$LAST" 2>/dev/null; then
+  } | LC_ALL=C sort -t$'\t' -k2 >"$tmp") 2>/dev/null || {
     rm -f "$tmp"
-    echo "warning: cannot record the store signature in $LAST, so a rolled-back store will go unnoticed" >&2
-  fi
+    return 1
+  }
+}
+
+has_record() { # whether $LAST already holds a line for this store
+  [ -f "$LAST" ] && awk -v db="$DB" '{ t = index($0, "\t") } substr($0, t + 1) == db { f = 1 } END { exit !f }' "$LAST"
 }
 
 write_db() { # stdin: entry lines
@@ -257,8 +261,23 @@ write_db() { # stdin: entry lines
     sig=$(hmac_file "$body")
     printf '%s%s\n' "$SIGTAG" "$sig" >>"$body"
   fi
+  # Build the next record before the store changes: a new store under an old record line
+  # would read as rolled back on every later check, and init could not repair it.
+  local rec=
+  if [ -n "$KEYFILE" ]; then
+    if record_tmp "$sig"; then
+      rec=$LAST.$$.tmp
+    elif has_record; then
+      die "cannot update the signature record in $LAST, so the store was left unchanged"
+    else
+      echo "warning: cannot record the store signature in $LAST, so a rolled-back store will go unnoticed" >&2
+    fi
+  fi
   mv "$body" "$DB" || die "cannot replace store: $DB"
-  [ -z "$KEYFILE" ] || record_sig "$sig"
+  if [ -n "$rec" ] && ! mv "$rec" "$LAST" 2>/dev/null; then
+    rm -f "$rec"
+    echo "warning: cannot record the store signature in $LAST, so a rolled-back store will go unnoticed" >&2
+  fi
 }
 
 # --- scanning ------------------------------------------------------------------

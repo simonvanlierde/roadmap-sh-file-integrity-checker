@@ -311,6 +311,19 @@ for impl in "${BUILT[@]}"; do
     assert "warning: cannot record the store signature"
     run 0 env INTEGRITY_KEY="$tmp/ro/key" INTEGRITY_DB="$tmp/ro.db" "$cli" check "$tmp/a.log"
     chmod 700 "$tmp/ro"
+    # Once a record line exists, an update that can't rewrite it stops before the store:
+    # a new store under the old line would read as rolled back on every later check.
+    mkdir "$tmp/ro2"
+    (umask 077 && head -c 32 /dev/urandom >"$tmp/ro2/key")
+    printf 'w1\n' >"$tmp/w.log"
+    run 0 env INTEGRITY_KEY="$tmp/ro2/key" INTEGRITY_DB="$tmp/ro2.db" "$cli" init "$tmp/w.log"
+    chmod 500 "$tmp/ro2"
+    printf 'w2\n' >"$tmp/w.log"
+    run 2 env INTEGRITY_KEY="$tmp/ro2/key" INTEGRITY_DB="$tmp/ro2.db" "$cli" update "$tmp/w.log"
+    assert "cannot update the signature record"
+    run 1 env INTEGRITY_KEY="$tmp/ro2/key" INTEGRITY_DB="$tmp/ro2.db" "$cli" check "$tmp/w.log"
+    assert "w.log: Modified"
+    chmod 700 "$tmp/ro2"
   fi
   unset INTEGRITY_KEY
 

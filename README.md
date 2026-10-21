@@ -70,7 +70,9 @@ another user who isn't root: `chmod 600` it, as with an ssh key.
 Each signed write also records the store's signature in `$INTEGRITY_KEY.last`, and every
 read checks it, so an older signed store put back in place is refused. To restore a backup on
 purpose, delete that store's line from the `.last` file. When the file can't be written,
-for example with the key on read-only media, `init` and `update` warn and carry on.
+for example with the key on read-only media, `init` and `update` warn and carry on. Once the
+file holds a line for the store, they stop with exit 2 instead and leave the store as it
+was, because a new store under the old line would read as rolled back.
 
 Signing only helps if the key sits somewhere the attacker can't reach: another host, a
 root-owned path, removable media. Keep it outside the monitored tree too, or it shows up as
@@ -104,7 +106,8 @@ for example on a tampered or rolled-back store.
 
 `./test.sh` runs one scenario against each built binary and checks that all three write
 byte-identical stores. `./difftest.sh` compares all three on 50 random trees and names the
-seed of the first difference. `./bench.sh` writes [BENCHMARKS.md](BENCHMARKS.md) and needs
+seed of the first difference. `cargo test --manifest-path rust/Cargo.toml` runs `test.sh`
+against the Rust debug build, so `cargo mutants` sees what the CLI does. `./bench.sh` writes [BENCHMARKS.md](BENCHMARKS.md) and needs
 [hyperfine](https://github.com/sharkdp/hyperfine).
 
 ## License

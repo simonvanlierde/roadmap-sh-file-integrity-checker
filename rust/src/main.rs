@@ -369,11 +369,23 @@ fn recorded() -> BTreeMap<String, String> {
     }
 }
 
-/// Record `sig` as this store's latest signature, or warn when the record cannot be written.
-fn record(db: &Path, sig: &str) {
+fn warn_no_record(last: &Path) {
+    eprintln!(
+        "warning: cannot record the store signature in {}, so a rolled-back store will go unnoticed",
+        last.display()
+    );
+}
+
+/// Write the next record, with `sig` for this store, to a temp file and return its path.
+/// Returns None, with a warning, when it can't be written and the record holds no line for
+/// this store. Exits instead when it does: a new store under that old line would read as
+/// rolled back on every later check, and init could not repair it.
+fn record_tmp(db: &Path, sig: &str) -> Option<PathBuf> {
     let last = last_path();
     let mut entries = recorded();
-    entries.insert(db.to_string_lossy().into_owned(), sig.to_owned());
+    let had = entries
+        .insert(db.to_string_lossy().into_owned(), sig.to_owned())
+        .is_some();
     let body: String = entries
         .iter()
         .map(|(p, s)| format!("{}\t{}\n", s, p))
@@ -382,22 +394,24 @@ fn record(db: &Path, sig: &str) {
     tmp.push(format!(".{}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
     let _ = fs::remove_file(&tmp);
-    let write = || -> std::io::Result<()> {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?
-            .write_all(body.as_bytes())?;
-        fs::rename(&tmp, &last)
-    };
-    if write().is_err() {
-        let _ = fs::remove_file(&tmp);
-        eprintln!(
-            "warning: cannot record the store signature in {}, so a rolled-back store will go unnoticed",
-            last.display()
-        );
+    let written = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(body.as_bytes()));
+    if written.is_ok() {
+        return Some(tmp);
     }
+    let _ = fs::remove_file(&tmp);
+    if had {
+        die(&format!(
+            "cannot update the signature record in {}, so the store was left unchanged",
+            last.display()
+        ));
+    }
+    warn_no_record(&last);
+    None
 }
 
 fn save(store: &Store<'_>, db: &Path) {
@@ -412,6 +426,8 @@ fn save(store: &Store<'_>, db: &Path) {
         body.push_str(sig);
         body.push('\n');
     }
+    // before the store changes; see record_tmp
+    let rec = sig.as_deref().and_then(|sig| record_tmp(db, sig));
     let name = db
         .file_name()
         .unwrap_or_else(|| die(&format!("invalid store path: {}", db.display())));
@@ -434,8 +450,12 @@ fn save(store: &Store<'_>, db: &Path) {
         let _ = fs::remove_file(&tmp);
         die(&format!("{}: {}", db.display(), e));
     });
-    if let Some(sig) = sig {
-        record(db, &sig);
+    if let Some(rec) = rec {
+        let last = last_path();
+        if fs::rename(&rec, &last).is_err() {
+            let _ = fs::remove_file(&rec);
+            warn_no_record(&last);
+        }
     }
 }
 
