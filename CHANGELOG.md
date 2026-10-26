@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- The Rust build locks ctutils 0.4.4, the first release without
+  [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385.html)
+  (non-constant-time mask generation and `u128` comparisons). hmac and sha2 pull it in.
+
 ## [0.2.0] - 2026-10-21
 
 ### Added
