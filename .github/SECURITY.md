@@ -4,7 +4,7 @@
 
 Report it privately, through
 [a GitHub security advisory](https://github.com/simonvanlierde/roadmap-sh-file-integrity-checker/security/advisories/new)
-or by email to <90462640+simonvanlierde@users.noreply.github.com>. Don't open a public issue or pull request for it:
+or by email to <code@duinlab.nl>. Don't open a public issue or pull request for it:
 anyone can read those before there is a fix.
 
 Please include:
