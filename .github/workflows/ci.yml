@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 3
     # ext4 accepts filenames APFS refuses outright, so Linux is the only place test.sh's
     # non-UTF-8 name case actually runs; it skips itself elsewhere. macOS covers BSD
     # stat/awk/sed, which differ from the GNU ones enough to have broken this before.
@@ -39,6 +40,7 @@ jobs:
         run: ./difftest.sh
 
   lint:
+    timeout-minutes: 2
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
